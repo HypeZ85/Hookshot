@@ -21,7 +21,7 @@ Native Linux support is capability-gated and experimental; see
 [the Linux notes](dlss5-linux.md).
 
 Missing/invalid DLLs, unsupported hardware and recoverable NGX failures are
-reported only inside the DLSS 5 tab, in both Base and Advanced. They do not
+reported only inside the Graphics > DLSS 5 submenu, in both Base and Advanced. They do not
 open a startup popup or erase saved preferences. Retry detection refreshes
 the cached check; changing driver/runtime initialization may require restart.
 Native HDR is bypassed because this NR path consumes SDR scene resources;
@@ -29,7 +29,7 @@ SDR and the existing Expanded HDR presentation path remain available.
 
 ## Controls
 
-The DLSS 5 tab follows the existing ImGui menu drawing/input conventions.
+The Graphics > DLSS 5 submenu follows the existing ImGui menu drawing/input conventions.
 Base exposes requested/effective enable state, intensity, visual profiles,
 Compare, shortcut mode, toolbar position and reset. Advanced has two groups:
 General (history, masks and diagnostics) and Quality (model and color controls).
@@ -45,7 +45,7 @@ to General; a saved Quality selection remains Quality.
 | Local structure/tone, Skin structure | Native `DLSSNR.LocalStructureStrength`, `DLSSNR.LocalToneStrength`, `DLSSNR.SkinStructureStrength`; negative skin sentinel follows structure |
 | Auto skin mask, UI correction | Native `DLSSNR.UseAutoMask`, `DLSSNR.UICorrection` flags; the private skin mask is not exposed for visualization |
 | Color strength | Compute composition in linear SDR Rec.709: mix original/NR chromaticity at NR luminance, preserve input alpha; independent of global intensity |
-| Temporal history | Auto uses NR history; Disabled sends the native reset flag every evaluation for diagnosis |
+| Temporal history | Auto sends NR Reset while the SR input is jittered, and on cuts/resizes/reactivation; Disabled always sends Reset. SR retains its own jitter/history |
 | Debug view | Actual original, raw NR, absolute RGB difference x20, device depth or motion resources; diagnostic outputs bypass NR processing |
 | Statistics | Extends the existing top-right FPS counter with frametime, effective NR dimensions and nonblocking Vulkan GPU timestamps around NR evaluation; unavailable measurements are `n/a`. Uses one shared panel, also when the separate FPS option is off. |
 
@@ -76,16 +76,19 @@ continues to consume input so comparison buttons do not also trigger game
 actions. Selecting Toolbar position in Base shows an inert placement preview.
 
 The toolbar has NR, intensity, profile, Save and Cancel. Both exit to the
-previous settings tab; Save commits the comparison changes, Cancel restores
+previous NR settings page; Save commits the comparison changes, Cancel restores
 the entry snapshot. Temporary shortcut presses do not write the config.
-Disabling NR skips its evaluation while retaining resources for a fast return;
-re-enabling resets the relevant temporal history.
+Disabling NR skips its evaluation while retaining resources during Compare
+for a fast return. Outside Compare, two seconds Off release the model, images,
+queries and composition pipeline through deferred destruction. Re-enabling
+resets the relevant histories once after NR actually evaluates successfully.
+Availability failure and Native HDR do not repeatedly reset SR.
 
 ## Resource and configuration handling
 
-Old `dlss5*` keys remain readable and are clamped on load. New profile/history/
-diagnostic/comparison values are persisted with the existing settings. Model
-edits are coalesced after slider release and a quiet period, with a minimum
+Old `dlss5*` keys remain readable and are clamped on load. Profile, history and
+comparison values use the existing persistence system. Debug view is session-only;
+legacy `dlss5_debug` values are ignored and removed on the next save. Model edits are coalesced after slider release and a quiet period, with a minimum
 interval/evaluation count between recreations. Color composition, debug and
 history reset are dynamic. Feature replacement keeps the last working model
 until a candidate succeeds; recoverable failure falls back and is logged once
@@ -110,3 +113,67 @@ Native Linux NR and Native HDR NR are not verified or claimed.
 One earlier Windows exit coincided with an NVIDIA TDR/LiveKernelEvent 141;
 its cause remains unresolved and a clean shutdown must not be assumed from
 forced process termination in a test harness.
+
+## Maintainer review follow-up
+
+The NR page is now a Graphics submenu directly below Upscaler, using the same
+navigation mechanism as Controls > Motion. It is absent from the main tab strip
+and hidden in builds without NGX. General/Quality and Base/Advanced share the
+same settings. FSR engines use the upstream shared temporal chain without NR;
+the DLSS engine alone consumes its immutable NR controls snapshot.
+
+NR allocates at the maximum SR input size (`feature_rw/feature_rh`), with the
+actual frame dimensions in all color/depth/motion/output subrects. Dynamic
+resolution within that allocation no longer recreates the feature or images.
+Only the actual evaluated dimensions are reported by statistics. NR history is
+reset on a subrect size change; that reset does not erase SR history.
+
+Both opaque NR CreateFeature/EvaluateFeature calls drain the upstream command
+recorder with `rec::boundary(rec::B_DIRECT)`. The recorder test recognizes the
+native NR API calls and checks that removing either boundary is caught.
+
+### Jitter contract and limits
+
+No verified NR jitter-offset, exposure or camera parameter is present in the
+community contract used here, or in the inspected 310.9.16 runtime's parameter
+strings. In particular, setting a guessed `DLSSNR.JitterOffset*` would not prove
+that NGX consumes it. This path therefore sends NR Reset for every jittered
+input frame. It leaves SR jitter, motion vectors and SR history intact. This
+avoids NR accumulating misregistered temporal samples, but is not a claim of
+temporally stable NR output or a validated unjittered reconstruction. Temporal
+History's help describes this restriction. An unjittered NR path, with matched
+depth/motion and a validated return into jittered SR coordinates, remains future
+renderer work; a simple color-only resample would not establish that contract.
+
+### Experimental API and fault injection
+
+Feature 18 / `Reserved18` and the `DLSSNR.*` keys remain a community-documented,
+undocumented-by-NVIDIA contract. Driver/runtime updates can change it. The user
+supplies the proprietary Windows runtime; no SDK, runtime or download is added.
+Linux has no known native NR runtime and currently provides opt-in capability
+probing and fallback only. Windows defaults to Off, with explicit menu opt-in;
+requiring an additional environment opt-in before shipping is a maintainer
+policy decision, not an implication of this implementation.
+
+`RX_VK_NR_TEST_REJECT_INTENSITY` is read only when a developer compiles
+`vk_dlss.cpp` with `HOOKSHOT_NR_TESTING`. Normal builds do not read this fault
+injection variable. It deliberately rejects creation at a chosen intensity to
+exercise candidate rollback without exhausting GPU memory.
+
+### Subrect GPU probe
+
+`tests/dlss_nr_subrect_probe.cpp` is an optional Windows-only, synthetic-input
+NGX probe. It writes no image files and is not run in game-free CI. Supply your
+own NGX SDK and NR runtime. From a Visual Studio developer prompt, with SDK
+and Vulkan include paths available:
+
+```bat
+cl /std:c++20 /EHsc /MT /I "%HOOKSHOT_NGX_SDK%\include" /I "%VULKAN_SDK%\Include" tests\dlss_nr_subrect_probe.cpp "%HOOKSHOT_NGX_SDK%\lib\nvsdk_ngx_s.lib" advapi32.lib user32.lib /Fe:build\dlss_nr_subrect_probe.exe
+build\dlss_nr_subrect_probe.exe "C:\path\to\your\runtime" "C:\path\to\writable\ngx-cache"
+```
+
+On an RTX 5080 with runtime 310.9.16, one 640x360 feature evaluated
+640x360 -> 512x288 -> 432x240 -> 640x360 successfully. Readback found no writes
+outside the active output subrect and no NaN/Inf. The final full-size output
+matched the first bit for bit. This verifies the tested runtime's changing
+subrect handling, not every resolution, driver, or temporal image quality.

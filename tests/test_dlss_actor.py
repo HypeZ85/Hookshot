@@ -42,13 +42,13 @@ def main():
         got = fields((SHADERS / name).read_text(encoding="utf-8"), "uniform P {", "} pc;")
         if got != want:
             raise SystemExit("%s: its push constants %s are not dlss_actor::Push's %s" % (name, got, want))
-    dlss = (ROOT / "gpu" / "vk" / "vk_dlss.cpp").read_text(encoding="utf-8")
-    if "using ActorPush = dlss_actor::Push;" not in dlss or "dlss_actor::index_start(" not in dlss:
-        raise SystemExit("vk_dlss.cpp does not use dlss_actor.h")
+    chain = (ROOT / "gpu" / "vk" / "vk_temporal.cpp").read_text(encoding="utf-8")
+    if "using ActorPush = dlss_actor::Push;" not in chain or "dlss_actor::index_start(" not in chain:
+        raise SystemExit("vk_temporal.cpp does not use dlss_actor.h")
     glslang = shutil.which("glslangValidator")
     with tempfile.TemporaryDirectory(prefix="dlss-actor-") as tmp:
         if glslang:
-            for src in ("dlss_actor.vert", "dlss_actor.frag", "dlss_prep.comp", "dlss_out.comp"):
+            for src in ("dlss_actor.vert", "dlss_actor.frag", "dlss_prep.comp", "dlss_out.comp", "dlss_nr_composite.comp"):
                 var = src.replace(".", "_").upper() + "_SPV"
                 out = Path(tmp) / (src.replace(".", "_") + "_spv.h")
                 subprocess.run([glslang, "-V", "--target-env", "vulkan1.3", "--vn", var, "-o", str(out), str(SHADERS / src)],

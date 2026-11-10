@@ -1,0 +1,95 @@
+# DLSS 5 review follow-up validation
+
+This follow-up integrates the feature with upstream main through
+`fc375e9612ae528e9ec62dd98bc4a4578f84bb67` (10 November 2026). The shared
+`vk_temporal` chain, FSR engines, recorder, Audio tab and current Debug layout
+are retained. NR remains part of the DLSS engine alone.
+
+## Review changes
+
+| Review point | Change | Evidence |
+| --- | --- | --- |
+| Dynamic resolution recreation | NR creation and allocations use the SR maximum input size; each evaluation supplies the current subrect | Real synthetic GPU subrect probe; Windows engine build |
+| Native HDR resets SR every frame | Reset only when leaving an active NR path | Production early-exit policy executed over 600 blocked frames |
+| Unavailable NR resets SR every second | Availability checks preserve SR history after the initial transition and avoid repeated destruction | Production policy executed with a fake clock and repeated failed probes |
+| Off retains model VRAM | Keep it for Compare, release after two seconds Off outside Compare using the shared deferred lifetime | Clock-driven grace/re-enable/Compare tests |
+| Recorder ordering | Drain B_DIRECT before both native NGX NR calls | Source validation and negative mutations that remove the boundaries |
+| Jitter metadata | No verified NR keys found; reset NR history for jittered inputs and preserve SR jitter/history | Contract inspection and code; temporal visual quality remains unverified |
+| Production fault injection | Requires HOOKSHOT_NR_TESTING; ordinary builds do not read the variable | Windows build and source inspection |
+| Always-visible DLSS 5 tab | Graphics submenu under Upscaler, hidden without NGX | Executed production row visibility and parent/submenu navigation |
+| Compiler discovery | Four original NR tests and the lifecycle test declare RUN_ALL_ARGS | Full test runner uses its detected compiler; main has replaced the old ARGS table |
+| Shader header coverage | Composite shader added to test_dlss_actor.py | glslang shader-to-header comparison passed |
+| Debug persisted into next launch | Ignore legacy dlss5_debug on load and omit it on save | Executed production ini load/save loops; legacy debug=5 did not bypass NR in the live renderer |
+
+## Builds and automated checks
+
+- Windows NGX Vulkan renderer: linked successfully with llvm-mingw 23 and the
+  local NGX SDK. No SDK files or binaries are part of the change.
+- Complete isolated Windows game: built successfully, including the current
+  host/renderer API, in 16 minutes 27 seconds. The installed renderer is the
+  final separately checked NR build.
+- Windows no-SDK: vk_dlss.cpp compiles without HOOKSHOT_NGX.
+- Native Linux (offline Debian 12 / GCC 12.2): vk_menu.cpp, vk_imgui.cpp and
+  vk_dlss.cpp with NGX, plus vk_dlss.cpp without NGX, compile; four native CPU
+  checks pass. This is not a Linux renderer link or GPU run.
+- Full game-free Windows suite: **323 passed, 6 failed, 21 skipped**. All five
+  NR checks, shader header comparison, affected menu fixtures and FPS ordering
+  checks passed. The six failures were also reproduced on a separate clean
+  upstream-main checkout with the same tools:
+  - nx2/test_nup_paths.py: Windows link/junction privileges and sandbox limits.
+  - test_bake_ds.py: zstd command-line tool unavailable.
+  - test_builder_details_hitbox.py, test_builder_dlss_update.py and
+    test_updater_asset_digest.py: .NET runtime present, .NET SDK absent.
+  - test_recorder_sync.py: its Windows negative exit fixture also exits cleanly
+    with the intentionally old recorder destructor, so the mutation is not
+    caught on this local toolchain. Its NR boundary/source checks and normal
+    command-stream runs passed before that unchanged negative fixture failed.
+
+The runner's Windows result is not reported as an all-green suite or a CI
+result. No unrelated tests were weakened to hide these failures.
+
+## Real GPU checks
+
+Hardware: NVIDIA GeForce RTX 5080, driver 617.42, user-supplied NR 310.9.16.
+The optional tests/dlss_nr_subrect_probe.cpp uses synthetic gradients and
+constant depth/motion; it writes no images. It was compiled with both
+llvm-mingw and MSVC. One 640x360 feature evaluated 640x360, 512x288, 432x240,
+then 640x360 without recreation. GPU readback found no writes outside each
+active subrect and no NaN/Inf; the first and last full-size outputs matched
+bit for bit. This is evidence for that runtime and those sizes only.
+
+The headless game exercised over 5,400 actual NR evaluations with the upstream
+threaded recorder, at an active size of 1440x810. It logged no NR evaluation
+or device-loss failure. The headless path does not normally tick menu input,
+so that run is not counted as a Toggle/Hold, menu or normal-window-exit test.
+It was stopped by the test harness.
+
+The normal-window test then exercised both missing-runtime and available-runtime
+starts with RX_VK_RECORDER=thread, without image capture. The missing-runtime
+run rendered normally, logged the missing nvngx_dlssnr.dll, and produced no
+native modal dialog. After restoring the DLL and restarting, preflight reported
+available=1 and NR evaluated successfully. A legacy dlss5_debug=5 entry was
+ignored: NR ran normally, and a subsequent settings save omitted that key.
+
+Scripted menu input entered Graphics > DLSS 5 > Compare with Right, toggled NR
+four times, cancelled back to settings, selected Hold, held/released the shortcut
+and cancelled again. Evaluation counters stayed unchanged while NR was bypassed.
+No feature was recreated during these comparison transitions. Ordinary Off then
+released NR resources after two seconds; switching On created one new feature.
+Both normal-window runs exited after WM_CLOSE to their own Hookshot window,
+within the 30-second watchdog and without forced termination. This is not a
+claim that the earlier intermittent shutdown/TDR cause has been fixed.
+
+The test used a separate copy of the saves. The DLL and original options were
+restored afterwards; the original and restored options have identical SHA-256.
+The contributor's main game installation was not changed.
+
+## Remaining validation limits
+
+No screenshots or generated previews were taken. The contributor reviewed and approved the updated menu in the running game
+before authorizing publication of this follow-up. Physical controller navigation, every aspect ratio,
+all DRS ranges, injected device loss and temporal NR image quality have not
+been exhaustively verified. The earlier Windows exit/TDR report remains an
+open limitation; this follow-up does not claim a general shutdown fix.
+Native Linux NR has no known compatible runtime and remains capability
+probing/fallback, not verified Linux GPU support.

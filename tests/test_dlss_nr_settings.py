@@ -1,4 +1,6 @@
 """Exercise the live NR edit policy without loading NVIDIA's runtime."""
+RUN_ALL_ARGS = ["--cxx", "{cxx}"]
+
 import argparse
 from pathlib import Path
 import subprocess

@@ -1,4 +1,6 @@
 """Behavioral tests of NR profiles and temporary comparison state, without a GPU."""
+RUN_ALL_ARGS = ["--cxx", "{cxx}"]
+
 import argparse
 from pathlib import Path
 import subprocess

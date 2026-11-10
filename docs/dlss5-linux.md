@@ -27,7 +27,7 @@ No native NR filename, ABI availability or future release date is assumed.
 - Opt-in probes the existing native NGX session. An actual successful
   DLSSNR.Available capability response is mandatory before CreateFeature(18).
   Missing keys/unavailable capability produce a specific native-runtime
-  explanation in the NR tab; unsupported GPU and driver-update responses
+  explanation in the NR submenu; unsupported GPU and driver-update responses
   retain their respective errors.
 - Native NGX owns feature discovery through the existing NGX search paths.
   No private .so filename is guessed, no Windows DLL is dlopened, and no
@@ -56,7 +56,7 @@ RX_VK_DLSS_NR_LINUX=1 ./hookshot
 
 Or set RX_VK_DLSS_NR_LINUX=1 in the existing launch environment, then restart.
 This setting is intentionally not an in-game promise of availability.
-Select NVIDIA DLSS/DLAA and open the DLSS 5 tab. It reports experimental
+Select NVIDIA DLSS/DLAA and open the Graphics > DLSS 5 submenu. It reports experimental
 status, capability failure or effective evaluation. Retry refreshes cached
 capability checks; changing the driver/runtime or opt-in setting requires
 restart. A copied Windows DLL is not considered proof of Linux support.

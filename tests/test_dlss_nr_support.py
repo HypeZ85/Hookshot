@@ -1,4 +1,6 @@
 """Exercise the NR activation policy, independent of the installed GPU and NVIDIA driver."""
+RUN_ALL_ARGS = ["--cxx", "{cxx}"]
+
 import argparse
 from pathlib import Path
 import subprocess
