@@ -64,6 +64,10 @@ void apply_pad_layout(int) {}
 void apply_preset(int) { presets++; }
 void sync_preset_budgets(int) {}
 /* (stand-ins for the rest of set_row, which the Rumble strength row never reaches: the Upscaler's rows, the restart offer) */
+bool nr_slider(const int*) { return false; }
+bool nr_prepare_row(Row&, int&, int) { return true; }
+void nr_row_changed(Row&) {}
+const char* nr_ini_key(const int*) { return nullptr; }
 bool row_fixed(const int*) { return false; }
 int upscaler() { return 0; }
 namespace ur {

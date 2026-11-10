@@ -23,6 +23,12 @@ struct Options {
     int dlss_model = 0;   // DLSS's network, by its preset: 0 K (transformer), 1 M, 2 L (second-generation transformer), 3 NVIDIA's
                           // default (upscaler_rows.h model_preset; vk_dlss.cpp). RX_VK_DLSS_PRESET over it
     int sharpness = 0;    // 0 to 100
+    int dlss5 = 0;       // Experimental Neural Rendering, before SR/DLAA. All controls apply live.
+    int dlss5_intensity = 35, dlss5_structure = 100, dlss5_tone = 100, dlss5_skin = 100;
+    int dlss5_style = 0, dlss5_preset = 0, dlss5_mask = 1, dlss5_ui = 1;
+    int dlss5_profile = 4, dlss5_color = 100, dlss5_history = 0, dlss5_debug = 0;
+    int dlss5_advanced = 0, dlss5_group = 0, dlss5_stats = 0;
+    int dlss5_compare_mode = 0, dlss5_compare_top = 0;
     int realtime = 1;     // game time follows the clock (host/nn_vi.c); 0: per frame (slower frames, slower game)
     int handheld = 0;     // the game's handheld profile: ~4 fps, softer; read once, at the start (host/nn_applet.c)
     int ultrawide = 0;    // the camera at the monitor's shape when it is wider than 16:9; read once, at the start (host/hos_main.c)
@@ -68,6 +74,8 @@ void menu_init();             // (the options from the file, once)
 void menu_set_gpu_count(int count);
 void menu_tick();             // (each frame shown: the keys, while the game's window has the focus)
 bool menu_is_open();
+bool menu_nr_editing();       // A model slider is held: defer expensive feature recreation until release.
+bool menu_comparing();        // Comparison owns input but leaves the scene unpaused and unobscured.
 bool resolution_auto();       // (the game's dynamic resolution: Resolution Auto)
 int resolution_scale();       // (the fixed path's scale in 1/10000: the Resolution row's, as a twelfth of the output)
 void menu_option_set(int id, int value);   // (from the game's side: 7 the mouse's sensitivity, the - and = keys)

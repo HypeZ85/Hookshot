@@ -45,6 +45,10 @@ int saves = 0;
 void save() { ++saves; }
 void apply_pad_layout(int) {}
 void sync_preset_budgets(int) {}
+bool nr_slider(const int*) { return false; }
+bool nr_prepare_row(Row&, int&, int) { return true; }
+void nr_row_changed(Row&) {}
+const char* nr_ini_key(const int*) { return nullptr; }
 bool row_fixed(const int*) { return false; }
 int upscaler() { return 0; }
 unsigned upscalers_available() { return 1; }

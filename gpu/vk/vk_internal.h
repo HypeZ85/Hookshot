@@ -40,6 +40,8 @@ struct Device {
     VkPhysicalDeviceProperties props{};
     VkPhysicalDeviceMemoryProperties memory{};
     VkPhysicalDeviceFeatures features{};
+    bool host_query_reset = false;
+    uint32_t timestamp_bits = 0;
     VkDevice device = VK_NULL_HANDLE;
     uint32_t queue_family = 0;
     VkQueue queue = VK_NULL_HANDLE;

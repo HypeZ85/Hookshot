@@ -37,7 +37,8 @@ def main():
 #include <string>
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr, "FAIL:%d %s\n", __LINE__, #x); std::exit(1); } } while (0)
 using VkCommandBuffer = int;
-struct { bool show_fps = false; } opts;
+struct { bool show_fps = false, dlss5_stats = false; } opts;
+struct { bool active = false; } nr_comparison;
 std::atomic<bool> open_now{false}, startup_on{false};
 std::string calls;
 bool can_draw = true;
@@ -58,14 +59,17 @@ void draw_menu(ui::Ctx&) { calls += "m"; }
 void draw_fps(ui::Ctx&, bool under_banner) { calls += under_banner ? "F" : "f"; }
 ''' + fn + r'''
 int main() {
-    for (bool startup : {false, true}) for (bool fps : {false, true}) for (bool menu : {false, true}) for (bool can : {true, false}) {
+    for (bool startup : {false, true}) for (bool fps : {false, true}) for (bool menu : {false, true})
+    for (bool stats : {false, true}) for (bool compare : {false, true}) for (bool can : {true, false}) {
         opts.show_fps = fps;
+        opts.dlss5_stats = stats;
+        nr_comparison.active = compare;
         open_now = menu;
         startup_on = startup;
         can_draw = can;
         calls.clear();
         menu_record(1, 2, 640, 360);
-        if (!startup && !fps && !menu) {   // (nothing shows: no ImGui frame at all, only the reaping; after a resize, one bake)
+        if (!startup && !fps && !menu && !stats) {   // (nothing shows: no ImGui frame at all, only the reaping; after a resize, one bake)
             CHECK(calls == "i");
             calls.clear(), resized = true;
             menu_record(1, 2, 640, 360);
@@ -77,7 +81,7 @@ int main() {
         std::string want = "bp";
         if (startup) want += "s";
         if (menu) want += "m";
-        if (fps && !startup) want += menu ? "F" : "f";
+        if ((fps || (stats && (!menu || compare))) && !startup) want += menu && !compare ? "F" : "f";
         want += "r";
         CHECK(calls == want);
     }

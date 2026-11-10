@@ -18,6 +18,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <climits>
 #include <utility>
 #include <cstdio>
 #include <cstring>
@@ -41,6 +42,7 @@
 #include "vk_reflex.h"
 #include "upscaler_rows.h"
 #include "menu_restart.h"
+#include "dlss_nr_controls.h"
 #ifndef HOOKSHOT_VERSION   // (nx2/build.py gives it to this file: nx2/version.py)
 #define HOOKSHOT_VERSION "unknown"
 #endif
@@ -57,11 +59,86 @@ enum MenuTab {
     TAB_GAMEPLAY = 1,
     TAB_CONTROLS = 2,
     TAB_DEBUG = 3,   // (the OoT debug tools of #785, a tab of their own)
-    TAB_COUNT = 4,
+    TAB_DLSS5 = 4,
+    TAB_COUNT = 5,
     TAB_MOTION = TAB_COUNT,   // (hookshot: not a tab of the strip, the Motion page that the Controls tab's Motion row
                               // opens: one past the strip's tabs, so a tab added before TAB_COUNT moves it along)
     TAB_PAGE = TAB_MOTION + 1   // (hookshot: the Controls page's rows, above its grid; no tab shows them)
 };
+
+
+bool nr_slider(const int* value) {
+    return value == &opts.dlss5_intensity || value == &opts.dlss5_structure ||
+           value == &opts.dlss5_tone || value == &opts.dlss5_skin;
+}
+bool nr_control(const int* value) {
+    return nr_slider(value) || value == &opts.dlss5_style || value == &opts.dlss5_preset ||
+           value == &opts.dlss5_mask || value == &opts.dlss5_ui;
+}
+const char* tx_nr(int v) {
+    if (!v) return "Off (requested)";
+    if (dlss_nr::blocking(dlss_nr_issue())) return "On (unavailable)";
+    if (opts.dlss5_debug == 1 || opts.dlss5_debug >= 4) return "On (debug bypass)";
+    if (!dlss_wanted()) return "On (choose DLSS/DLAA)";
+    switch (dlss_nr_status()) {
+    case NR_ACTIVE:
+#if defined(__linux__) && !defined(_WIN32)
+        return "On (experimental active)";
+#else
+        return "On (active)";
+#endif
+    case NR_PENDING: return "On (applying...)";
+    case NR_FAILED: return "On (failed: see log)";
+    default: return "On (waiting for scene)";
+    }
+}
+const char* tx_nr_style(int v) {
+    static const char* names[] = {"Standard (0)", "Natural (1)", "Cinematic (2)"};
+    return names[std::clamp(v, 0, 2)];
+}
+const char* tx_nr_preset(int v) {
+    static const char* names[] = {"Default", "Preset 1", "Legacy hint 2", "Legacy hint 3"};
+    return names[std::clamp(v, 0, 3)];
+}
+const char* tx_nr_strength(int v) {
+    static char b[24];
+    if (v < 0) return "Follow structure";
+    snprintf(b, sizeof b, "%d%%", v);
+    return b;
+}
+
+const char* tx_nr_page(int v) { return v ? "ADVANCED" : "BASE"; }
+const char* tx_nr_group(int v) {
+    static const char* names[] = {"General", "Quality"};
+    return names[std::clamp(v, 0, 1)];
+}
+const char* tx_nr_profile(int v) { return dlss_nr::profile_name(v); }
+const char* tx_nr_history(int v) { return v ? "Disabled (reset each frame)" : "Auto"; }
+const char* tx_nr_mode(int v) { return v ? "F8: Hold" : "F8: Toggle"; }
+const char* tx_nr_position(int v) { return v ? "Top" : "Bottom"; }
+const char* tx_nr_debug(int v) {
+    if ((v == 2 || v == 3) && (!opts.dlss5 || dlss_nr::blocking(dlss_nr_issue()))) return "Unavailable (original input)";
+    static const char* names[] = {"Normal", "Original input", "Raw NR output", "Difference x20", "Device depth", "Motion vectors"};
+    return names[std::clamp(v, 0, 5)];
+}
+dlss_nr::Settings nr_model() {
+    return {opts.dlss5_intensity, opts.dlss5_structure, opts.dlss5_tone, opts.dlss5_skin,
+            opts.dlss5_style, opts.dlss5_preset, opts.dlss5_mask, opts.dlss5_ui};
+}
+void nr_look(const dlss_nr::Look& look) {
+    opts.dlss5_intensity = look.model.intensity;
+    opts.dlss5_structure = look.model.structure;
+    opts.dlss5_tone = look.model.tone;
+    opts.dlss5_skin = look.model.skin;
+    opts.dlss5_style = look.model.style;
+    opts.dlss5_preset = look.model.preset;
+    opts.dlss5_mask = look.model.mask;
+    opts.dlss5_ui = look.model.ui;
+    opts.dlss5_color = look.color;
+}
+void nr_publish() {
+    dlss_nr_publish({opts.dlss5 != 0, nr_model(), opts.dlss5_color, opts.dlss5_history, opts.dlss5_debug, opts.dlss5_stats != 0, opts.hdr == 2});
+}
 
 struct Row {
     MenuTab tab;
@@ -79,6 +156,7 @@ struct Row {
                                   // frame generation)
     signed char cheat = -1;   // (a debug tool, on the Debug tab with the tools on: its index in the cheat_ tables, -1 none)
     bool heading = false;     // (a section's title on its tab, not a row: the selection steps over it)
+    int nr_area = 0;
 };
 /// A row's hints from a table, the value lo first (nullptr: none for that value)
 const char* hint_in(const char* const* t, int n, int lo, int v, int variant) {
@@ -303,7 +381,10 @@ const char* hn_resolution(int v, int variant) {
 }
 /// A row with nothing else to choose here: shown without its arrows, Left and Right leave it (and the saved value) alone
 bool row_fixed(const int* value) {
-    return (value == &opts.reflex && !reflex_available()) || (value == &opts.dlss && ur::upscaler_fixed(upscalers_available())) ||
+    return            (value == &opts.dlss5 && !opts.dlss5 && dlss_nr::blocking(dlss_nr_issue())) ||
+           (value == &opts.dlss5_debug && !dlss_wanted()) ||
+           ((nr_control(value) || value == &opts.dlss5_color || value == &opts.dlss5_history || value == &opts.dlss5_profile) && dlss_nr::blocking(dlss_nr_issue())) ||
+           (value == &opts.reflex && !reflex_available()) || (value == &opts.dlss && ur::upscaler_fixed(upscalers_available())) ||
            (value == &opts.resolution && ur::resolution_fixed(upscaler())) || (value == &opts.upscale && !filter_needed()) ||
            (value == &opts.dlss_model && ur::model_fixed(upscaler(), dlss_preset_env() != nullptr));
 }
@@ -589,6 +670,37 @@ Row rows[] = {
      "Bounds-checked buffer reads: a read past a buffer's end is dropped instead of stopping the GPU. Applies after a "
      "restart.", hn_robust, true},
 
+    // The same persistent state on both pages; grouping keeps the list short.
+    {TAB_DLSS5, "Controls", &opts.dlss5_advanced, 0, 1, 1, tx_nr_page, "Base: everyday controls. Advanced: General and Quality.", nullptr, false, true, -1, false, 0},
+    {TAB_DLSS5, "Group", &opts.dlss5_group, 0, 1, 1, tx_nr_group, "General: history, masks and diagnostics. Quality: model and color controls.", nullptr, false, true, -1, false, 2},
+#if defined(__linux__) && !defined(_WIN32)
+    {TAB_DLSS5, "Neural Rendering", &opts.dlss5, 0, 1, 1, tx_nr, "Experimental native Linux NR. Opt in with RX_VK_DLSS_NR_LINUX=1. Needs DLSS/DLAA and native NGX NR capability; Windows DLLs do not work natively. Errors stay here.", nullptr, false, true, -1, false, 0},
+#else
+    {TAB_DLSS5, "Neural Rendering", &opts.dlss5, 0, 1, 1, tx_nr, "Saved request and actual runtime state. Needs DLSS/DLAA and your own ngx/nvngx_dlssnr.dll. Errors stay here.", nullptr, false, true, -1, false, 0},
+#endif
+    {TAB_DLSS5, "Intensity", &opts.dlss5_intensity, 0, 200, 5, tx_nr_strength, "Native model strength. Original default: 35%. Model edits apply after slider release and a short pause.", nullptr, false, true, -1, false, 0},
+    {TAB_DLSS5, "Visual profile", &opts.dlss5_profile, 0, 4, 1, tx_nr_profile, "Original disables NR. Faithful preserves original chromaticity; Balanced keeps legacy defaults; Intense uses 100% intensity. Manual edits select Custom.", nullptr, false, true, -1, false, 1},
+    {TAB_DLSS5, "Compare", nullptr, 0, 0, 0, nullptr, "Right opens the comparison toolbar. There, F8 or the controller face button shown on the toolbar compares NR. Save confirms; Cancel restores.", nullptr, false, true, -1, false, 1},
+    {TAB_DLSS5, "Compare shortcut", &opts.dlss5_compare_mode, 0, 1, 1, tx_nr_mode, "Only inside Compare: F8 or the controller face button shown on the toolbar. Toggle switches NR; Hold shows original while held. Open Compare with Right.", nullptr, false, true, -1, false, 1},
+    {TAB_DLSS5, "Toolbar position", &opts.dlss5_compare_top, 0, 1, 1, tx_nr_position, "Preview of the Compare toolbar. Left/Right moves it between top and bottom. The preview cannot change NR or save settings.", nullptr, false, true, -1, false, 1},
+    {TAB_DLSS5, "Temporal history", &opts.dlss5_history, 0, 1, 1, tx_nr_history, "Auto uses NGX temporal history. Disabled sends the native Reset flag every frame for diagnosis; this can increase flicker.", nullptr, false, true, -1, false, 3},
+    {TAB_DLSS5, "Style", &opts.dlss5_style, 0, 2, 1, tx_nr_style, "Native profile 0/1/2. Names are community terminology, not official NVIDIA names.", nullptr, false, true, -1, false, 4},
+    {TAB_DLSS5, "Model preset", &opts.dlss5_preset, 0, 3, 1, tx_nr_preset, "Default and Preset 1 produced distinct GPU output. Hints 2/3 matched default in this runtime test; old saved hints are retained, not offered as new choices.", nullptr, false, true, -1, false, 4},
+    {TAB_DLSS5, "Local structure", &opts.dlss5_structure, 0, 200, 5, tx_nr_strength, "Native local structure strength; original default 100%.", nullptr, false, true, -1, false, 4},
+    {TAB_DLSS5, "Local tone", &opts.dlss5_tone, 0, 200, 5, tx_nr_strength, "Native local tone strength; original default 100%.", nullptr, false, true, -1, false, 4},
+    {TAB_DLSS5, "Skin structure", &opts.dlss5_skin, -5, 200, 5, tx_nr_strength, "Follow structure uses NGX's -1 sentinel; 0 to 200% controls skin independently.", nullptr, false, true, -1, false, 4},
+    {TAB_DLSS5, "Color strength", &opts.dlss5_color, 0, 100, 5, tx_nr_strength, "0% keeps original chromaticity at NR luminance; 100% keeps NR colors. Linear SDR composition, independent of native Intensity.", nullptr, false, true, -1, false, 4},
+    {TAB_DLSS5, "Auto skin mask", &opts.dlss5_mask, 0, 1, 1, tx_onoff, "Native automatic skin detection. Its internal mask is not exposed as a readable renderer buffer.", nullptr, false, true, -1, false, 3},
+    {TAB_DLSS5, "UI correction", &opts.dlss5_ui, 0, 1, 1, tx_onoff, "Native flag. Hookshot's HUD and menus are drawn after NR and already bypass it.", nullptr, false, true, -1, false, 3},
+    {TAB_DLSS5, "Debug view", &opts.dlss5_debug, 0, 5, 1, tx_nr_debug, "Actual buffers. Difference: luma-weighted absolute linear RGB delta x20. Depth: device depth. Motion: R=X, G=Y, gray=zero, +/-16 pixels.", nullptr, false, true, -1, false, 3},
+    {TAB_DLSS5, "Statistics", &opts.dlss5_stats, 0, 1, 1, tx_onoff, "Extends the top-right FPS counter with frametime, NR resolution and nonblocking GPU timestamps for NGX evaluation only. Hidden while full settings are open.", nullptr, false, true, -1, false, 3},
+#if defined(__linux__) && !defined(_WIN32)
+    {TAB_DLSS5, "Retry detection", nullptr, 0, 0, 0, nullptr, "Recheck native NGX capability. A changed driver/runtime or the Linux opt-in environment setting requires a restart.", nullptr, false, true, -1, false, 0},
+#else
+    {TAB_DLSS5, "Retry detection", nullptr, 0, 0, 0, nullptr, "Recheck the local DLL and NGX capability. A previously failed DLL load or changed GPU driver may require a restart.", nullptr, false, true, -1, false, 0},
+#endif
+    {TAB_DLSS5, "Reset NR settings", nullptr, 0, 0, 0, nullptr, "Restore original NR tuning, Normal debug view and Auto history without changing the saved enable request.", nullptr, false, true, -1, false, 0},
+
     // Gameplay
     {TAB_GAMEPLAY, "FPS counter", &opts.show_fps, 0, 1, 1, tx_onoff, "Frames per second in the top right corner.", hn_fps,
      false, true},
@@ -807,7 +919,7 @@ const char* cheat_confirm(int i) {
 constexpr int kRows = sizeof rows / sizeof rows[0];
 
 int cur_tab = TAB_GRAPHICS;
-int tab_selected[TAB_COUNT + 1] = {0, 0, 0, 0, 0};   // (and the Motion page's)
+int tab_selected[TAB_COUNT + 1] = {};   // (and the Motion page's)
 bool is_motion_row(const Row& r) { return r.tab == TAB_CONTROLS && !r.value && !strcmp(r.name, "Motion"); }
 
 // ---- the rows that take a restart: their values at the start (menu_init, the GPU's at menu_set_gpu_count) ----
@@ -853,6 +965,12 @@ int ask_sel = 0;   // (the restart question's choice: 0 Later, 1 Restart now)
 
 /// A row on its tab: the debug tools only with them on, the Upscaler only in a build with DLSS or where AMD FSR 3.1 runs
 bool row_shown(int i) {
+    if (rows[i].tab == TAB_DLSS5) {
+        const int area = rows[i].nr_area;
+        if (area == 1 && opts.dlss5_advanced) return false;
+        if (area >= 2 && !opts.dlss5_advanced) return false;
+        if (area >= 3 && area != opts.dlss5_group + 3) return false;
+    }
     return (rows[i].cheat < 0 || cheats_on()) && (rows[i].value != &opts.dlss || ur::upscaler_shown(dlss_built(), fsr3::supported())) &&
            (rows[i].value != &opts.dlss_model || ur::model_shown(dlss_built()));
 }
@@ -885,9 +1003,9 @@ constexpr int64_t kMarqueeStep = 150000000LL, kMarqueeRest = 1200000000LL;   // 
 int hover_tab = -1;
 int drag_row = -1;
 bool mouse_read = false;   // (the menu has read the mouse since it opened)
-bool is_slider(const Row& r) { return r.value == &opts.sharpness || r.value == &opts.mouse_sens || r.value == &opts.gyro_sens_x || r.value == &opts.gyro_sens_y; }
+bool is_slider(const Row& r) { return nr_slider(r.value) || r.value == &opts.dlss5_color || r.value == &opts.sharpness || r.value == &opts.mouse_sens || r.value == &opts.gyro_sens_x || r.value == &opts.gyro_sens_y; }
 /// (a scale: the arrows and a click stop at its ends; Rumble strength would go from Off to its strongest)
-bool stops_at_ends(const Row& r) { return r.value == &opts.mouse_sens || r.value == &opts.rumble || r.value == &opts.gyro_sens_x || r.value == &opts.gyro_sens_y; }
+bool stops_at_ends(const Row& r) { return nr_slider(r.value) || r.value == &opts.dlss5_color || r.value == &opts.mouse_sens || r.value == &opts.rumble || r.value == &opts.gyro_sens_x || r.value == &opts.gyro_sens_y; }
 /// (the ini's Rumble strength on the menu's steps: 0 to 150, the nearest 25)
 int rumble_step(int v) { return (std::min(std::max(v, 0), 150) + 12) / 25 * 25; }
 std::string ini_path() {
@@ -896,7 +1014,30 @@ std::string ini_path() {
     std::string dir(exe, n);
     return dir.substr(0, dir.find_last_of("\\/") + 1) + "hookshot_options.ini";
 }
+const char* nr_ini_key(const int* value) {
+    if (value == &opts.dlss5) return "dlss5";
+    if (value == &opts.dlss5_intensity) return "dlss5_intensity";
+    if (value == &opts.dlss5_style) return "dlss5_style";
+    if (value == &opts.dlss5_preset) return "dlss5_preset";
+    if (value == &opts.dlss5_structure) return "dlss5_structure";
+    if (value == &opts.dlss5_tone) return "dlss5_tone";
+    if (value == &opts.dlss5_skin) return "dlss5_skin";
+    if (value == &opts.dlss5_mask) return "dlss5_mask";
+    if (value == &opts.dlss5_ui) return "dlss5_ui";
+    if (value == &opts.dlss5_advanced) return "dlss5_advanced";
+    if (value == &opts.dlss5_group) return "dlss5_group";
+    if (value == &opts.dlss5_profile) return "dlss5_profile";
+    if (value == &opts.dlss5_color) return "dlss5_color";
+    if (value == &opts.dlss5_history) return "dlss5_history";
+    if (value == &opts.dlss5_debug) return "dlss5_debug";
+    if (value == &opts.dlss5_stats) return "dlss5_stats";
+    if (value == &opts.dlss5_compare_mode) return "dlss5_compare_mode";
+    if (value == &opts.dlss5_compare_top) return "dlss5_compare_top";
+
+    return nullptr;
+}
 const char* ini_key(const Row& r) {
+    if (const char* nr = nr_ini_key(r.value)) return nr;
     if (r.value == &opts.output_res) return "output_res";   // (host/nn_applet.c reads it at the start)
     // (rows renamed since their values were first saved keep their keys: an options file from before still loads)
     if (r.value == &opts.resolution) return "resolution";
@@ -993,6 +1134,7 @@ void mic_chosen() {
     mic_row_ends();
     mic_tell_host();
 }
+int nr_persisted_value(const int* value);
 void save() {
     // (hookshot) the lines that are not the menu's are kept: the controls, pad_ and key_ (host/nn_hid.c)
     std::string kept;
@@ -1004,7 +1146,7 @@ void save() {
     }
     if (FILE* f = fopen(ini_path().c_str(), "w")) {
         for (const Row& r : rows)
-            if (r.value) fprintf(f, "%s=%d\n", ini_key(r), *r.value);
+            if (r.value) fprintf(f, "%s=%d\n", ini_key(r), nr_persisted_value(r.value));
         if (!mic_want.empty()) fprintf(f, "microphone_device=%s\n", mic_want.c_str());   // (hookshot: also while it is unplugged)
         // (2: game_speed below 2 was only ever the old default, see menu_init; 3: the mouse's buttons are bindings, see
         // host/nn_hid.c binds_load)
@@ -1020,9 +1162,30 @@ void save() {
 
 /// A row's new value v, as the arrows set it (dir: 1 up, -1 down, for the rows that skip or wrap), saved unless !keep
 /// (a slider's drag: saved once it is let go)
+void nr_compare_enter();
+bool nr_prepare_row(Row& r, int& v, int dir) {
+    if (r.value == &opts.dlss5_group) v = dir < 0 ? 0 : 1; // Two tabs: Left selects General, Right selects Quality.
+    if (r.value == &opts.dlss5 && !opts.dlss5 && dlss_nr::blocking(dlss_nr_check(true))) { menu_refresh = true; return false; }
+    if (r.value == &opts.dlss5_preset) v = dlss_nr::step_preset(*r.value);
+    if (r.value == &opts.dlss5_debug && (v == 2 || v == 3) && (!opts.dlss5 || dlss_nr::blocking(dlss_nr_issue()))) v = dir > 0 ? 4 : 1;
+
+    return true;
+}
+void nr_row_changed(Row& r) {
+    if (r.value == &opts.dlss5_profile) {
+        if (opts.dlss5_profile == dlss_nr::Original) opts.dlss5 = 0;
+        else if (opts.dlss5_profile != dlss_nr::Custom) { nr_look(dlss_nr::look(opts.dlss5_profile)); opts.dlss5 = 1; dlss_nr_check(true); }
+    } else if (nr_control(r.value) || r.value == &opts.dlss5_color) opts.dlss5_profile = dlss_nr::Custom;
+    if (r.value == &opts.dlss5) {
+        if (opts.dlss5) { if (opts.dlss5_profile == dlss_nr::Original) opts.dlss5_profile = dlss_nr::identify(nr_model(), opts.dlss5_color); dlss_nr_check(true); }
+        else opts.dlss5_profile = dlss_nr::Original;
+    }
+    nr_publish();
+}
 void set_row(Row& r, int v, int dir, bool keep = true) {
     // (nothing else to choose: no change, no save. A saved choice that cannot run here is kept)
     if (row_fixed(r.value)) return;
+    if (!nr_prepare_row(r, v, dir)) return;
     // (the scaling rows: only what can run here; the Render resolution row through the Upscaler's own steps)
     if (r.value == &opts.dlss) v = ur::step_upscaler(upscaler(), dir, upscalers_available());
     if (r.value == &opts.resolution) v = ur::step(upscaler(), *r.value, dir);
@@ -1048,6 +1211,7 @@ void set_row(Row& r, int v, int dir, bool keep = true) {
             sync_preset_budgets(0);
         }
     }
+    nr_row_changed(r);
     if (r.value == &opts.mic && can_mic()) mic_chosen();   // (hookshot)
     {   // (a row that takes a restart, or a preset that sets one: asked again at the next close)
         int now[mr::kMax];
@@ -1157,6 +1321,71 @@ const std::vector<int>& bindable_keys() {
 }
 int page = 0;          // 0 the options, 1 the controls, 3 the teleport list, 4 the inventory, 5 the restart question (2: was the
                        // debug tools' own page, now on the Debug tab)
+dlss_nr::Comparison nr_comparison;
+std::atomic<bool> comparison_open{false};
+std::atomic<bool> comparison_release{false};
+bool nr_script_f8 = false, nr_script_f8_press = false;
+struct NrSaved {
+    dlss_nr::Look look;
+    int requested, profile, mode, debug;
+} nr_saved;
+int nr_persisted_value(const int* value) {
+    if (!nr_comparison.active) return *value;
+    if (value == &opts.dlss5) return nr_saved.requested;
+    if (value == &opts.dlss5_profile) return nr_saved.profile;
+    if (value == &opts.dlss5_color) return nr_saved.look.color;
+    if (value == &opts.dlss5_compare_mode) return nr_saved.mode;
+    if (value == &opts.dlss5_debug) return nr_saved.debug;
+    if (value == &opts.dlss5_intensity) return nr_saved.look.model.intensity;
+    if (value == &opts.dlss5_structure) return nr_saved.look.model.structure;
+    if (value == &opts.dlss5_tone) return nr_saved.look.model.tone;
+    if (value == &opts.dlss5_skin) return nr_saved.look.model.skin;
+    if (value == &opts.dlss5_style) return nr_saved.look.model.style;
+    if (value == &opts.dlss5_preset) return nr_saved.look.model.preset;
+    if (value == &opts.dlss5_mask) return nr_saved.look.model.mask;
+    if (value == &opts.dlss5_ui) return nr_saved.look.model.ui;
+    return *value;
+}
+int nr_compare_selected = 0;
+bool nr_toolbar_preview() {
+    return open_now.load() && !nr_comparison.active && page == 0 && cur_tab == TAB_DLSS5 &&
+        rows[tab_row_to_global(TAB_DLSS5, tab_selected[TAB_DLSS5])].value == &opts.dlss5_compare_top;
+}
+void nr_compare_enter() {
+    if (dlss_nr::blocking(dlss_nr_check())) { menu_refresh = true; return; }
+    nr_saved = {{nr_model(), opts.dlss5_color}, opts.dlss5, opts.dlss5_profile, opts.dlss5_compare_mode, opts.dlss5_debug};
+    nr_comparison.enter(opts.dlss5 != 0);
+    if (host && host->take_key_press) host->take_key_press(VK_F8); // Discard a shortcut pressed before entering Compare.
+    opts.dlss5_debug = 0;
+    comparison_open = true;
+    dlss_nr_compare(nr_comparison.override_for(false, false));
+    nr_compare_selected = 0;
+    nr_publish();
+    menu_refresh = true;
+    logf("menu: NR comparison entered; saved request %d", opts.dlss5);
+}
+void nr_compare_leave(bool commit) {
+    if (commit) {
+        opts.dlss5 = nr_comparison.on;
+        if (!opts.dlss5) opts.dlss5_profile = dlss_nr::Original;
+        else if (opts.dlss5_profile == dlss_nr::Original) opts.dlss5_profile = dlss_nr::identify(nr_model(), opts.dlss5_color);
+    } else {
+        nr_look(nr_saved.look);
+        opts.dlss5 = nr_saved.requested, opts.dlss5_profile = nr_saved.profile;
+    }
+    opts.dlss5_compare_mode = nr_saved.mode, opts.dlss5_debug = nr_saved.debug;
+    nr_comparison.leave();
+    comparison_open = false;
+    comparison_release = true; // Do not leak the shortcut/confirm key into the game on the closing frame.
+    dlss_nr_compare(-1);
+    open_now = true;
+    nr_publish();
+    page = 0, cur_tab = TAB_DLSS5;
+    menu_refresh = true;
+    if (commit) save(); // End the transaction before writing; Cancel never writes temporary values.
+    logf("menu: NR comparison %s; returned to settings, request %d", commit ? "saved" : "cancelled", opts.dlss5);
+}
+
 int csel = 0, ccol = 0;   // the page's row (kTop first: its own rows, then the controls, then reset) and column (0 the
                           // gamepad, 1 the keyboard)
 const int kTop = tab_row_count(TAB_PAGE);   // (Layout preset and Button prompts: a preset shows in the grid at once)
@@ -1184,7 +1413,7 @@ float scroll_at[TAB_MOTION + 2];   // (the first row shown, eased toward the sel
                                    // the Controls page: kControlsSlot)
 constexpr int kControlsSlot = TAB_MOTION + 1;
 int wheel_rows[TAB_MOTION + 2];   // (the mouse wheel's notches since the last drawing, a slot each: scroll_rows scrolls by them)
-int scrolled_to[TAB_MOTION + 2] = {-1, -1, -1, -1, -1, -1};   // (the selection scroll_rows last brought into view)
+int scrolled_to[TAB_MOTION + 2] = {-1, -1, -1, -1, -1, -1, -1};   // (the selection scroll_rows last brought into view)
 float scroll_want[TAB_MOTION + 2];   // (where scroll_at is going: the wheel moves it, a new selection too)
 float ease_step = 0;     // (this drawing's share of the way: the time since the last one)
 
@@ -1411,22 +1640,61 @@ std::string restart_line(ui::Ctx& c, float px, float width) {
     return line;
 }
 
-void draw_options(ui::Ctx& c) {
+
+double nr_present_fps = 0;
+int nr_shortcut_pad() {
+    for (const int button : {HOS_PAD_WEST,HOS_PAD_NORTH,HOS_PAD_SOUTH,HOS_PAD_EAST})
+        if (button != pad_confirm && button != pad_back) return button;
+    return HOS_PAD_WEST;
+}
+void draw_nr_compare(ui::Ctx& c, bool preview) {
+    const float s = c.s, bw = std::min(980*s, c.w-2*c.safe), bh = 72*s;
+    const float x = (c.w-bw)*0.5f, y = opts.dlss5_compare_top ? c.safe : c.h-c.safe-bh;
+    const auto stats = dlss_nr_stats();
+    const bool desired = preview ? opts.dlss5 != 0 : nr_comparison.override_for(nr_comparison.was_held, opts.dlss5_compare_mode != 0)==1;
+    const char* state = dlss_nr::blocking(dlss_nr_issue()) ? "NR unavailable" :
+        stats.active != desired ? "NR applying..." : stats.active ? "NR ON" : "NR OFF";
+    const std::string labels[] = {state, "Intensity "+std::to_string(opts.dlss5_intensity)+"%",
+        tx_nr_profile(opts.dlss5_profile), "Save", "Cancel"};
+    c.d->AddRectFilled(ImVec2(x,y),ImVec2(x+bw,y+bh),ui::rgba(30,24,17,190),3*s);
+    c.d->AddRect(ImVec2(x,y),ImVec2(x+bw,y+bh),ui::alpha(ui::kEdge,0.8f),3*s);
+    if (!preview) hits.clear(x,y,x+bw,y+bh);
+    for (int i=0;i<5;++i) {
+        const ImVec2 a(x+bw*i/5+5*s,y+5*s), b(x+bw*(i+1)/5-5*s,y+39*s);
+        const bool selected = !preview && nr_compare_selected==i;
+        if (selected) ui::gold(c,a,b);
+        else c.d->AddRectFilled(a,b,ui::alpha(ui::kCellName,0.5f));
+        c.d->AddRect(a,b,selected ? ui::kGoldHi : ui::alpha(ui::kEdge,0.55f),0,std::max(1.0f,s));
+        const std::string label=fit(c,c.f.strong,17*s,b.x-a.x-10*s,labels[i],false);
+        ui::text_mid_centre(c,c.f.strong,17*s,(a.x+b.x)*0.5f,(a.y+b.y)*0.5f,selected ? ui::kGoldInk : ui::kInk,label.c_str());
+        if (!preview) hits.add(a.x,a.y,b.x,b.y,menu_hit::kNrButton,i,i==1||i==2 ? a.x : 0,i==1||i==2 ? b.x : 0);
+    }
+    const std::string hint = preview ? "Toolbar preview - Left/Right moves it. Open Compare to use Save / Cancel." :
+        std::string("F8 / ")+pad_name(nr_shortcut_pad())+(opts.dlss5_compare_mode ? ": hold for original" : ": toggle NR")+
+        "  |  Arrows: choose/adjust  |  Enter: select  |  Esc: Cancel";
+    const std::string line=fit(c,c.f.body,13*s,bw-24*s,hint,false);
+    ui::text(c,c.f.body,13*s,ImVec2(x+12*s,y+48*s),ui::kSoft,line.c_str());
+}
+void draw_options_content(ui::Ctx& c) {
     const float s = c.s, hh = banner_h(c);
     ui::banner(c, hh);
     // the tabs in the banner: dark ink on the tan, the shown one light on a dark inset; the tab keys at their ends (a click there
     // is the previous or the next tab)
-    const char* const tab_titles[TAB_COUNT] = {"Graphics", "Gameplay", "Controls", "Debug"};
+    const char* const tab_titles[TAB_COUNT] = {"Graphics", "Gameplay", "Controls", "Debug", "DLSS 5"};
     float tw[TAB_COUNT], total = 0;
     for (int i = 0; i < TAB_COUNT; i++) tw[i] = ui::size_of(c.f.heading, 23 * s, tab_titles[i]).x + 56 * s, total += tw[i];
+    // Fit all five tabs and their navigation prompts at 4:3 / Large menu size too.
+    const float ts = s * std::min(1.0f, std::max(1.0f, c.w - 2 * c.safe) / (total + 140 * s));
+    total = 0;
+    for (int i = 0; i < TAB_COUNT; i++) tw[i] = ui::size_of(c.f.heading, 23 * ts, tab_titles[i]).x + 56 * ts, total += tw[i];
     float x = (c.w - total) * 0.5f;
     const float ty = hh * 0.5f + s;
     const char* const keys[2] = {c.pad ? "L" : "Q", c.pad ? "R" : "E"};
     for (int i = 0; i < 2; i++) {
-        const float cw = 26 * s, cx = i ? x + total + 22 * s : x - 22 * s - cw;
+        const float cw = 26 * ts, cx = i ? x + total + 22 * ts : x - 22 * ts - cw;
         const bool hover = hover_tab == TAB_COUNT + i;
         c.d->AddRectFilled(ImVec2(cx, ty - 13 * s), ImVec2(cx + cw, ty + 13 * s), hover ? ui::kTabInset : ui::kBannerInk, 3 * s);
-        ui::text_mid_centre(c, c.f.strong, 14 * s, cx + cw * 0.5f, ty, ui::kInk, keys[i]);
+        ui::text_mid_centre(c, c.f.strong, 14 * ts, cx + cw * 0.5f, ty, ui::kInk, keys[i]);
         hits.add(i ? cx - 10 * s : 0, 0, i ? c.w : cx + cw + 10 * s, hh, i ? menu_hit::kTabNext : menu_hit::kTabPrev, -1);
     }
     for (int i = 0; i < TAB_COUNT; i++) {
@@ -1438,7 +1706,7 @@ void draw_options(ui::Ctx& c) {
                 c.d->AddLine(ImVec2(x + tw[i] - 1, 0), ImVec2(x + tw[i] - 1, hh - 3 * s), ui::rgba(52, 34, 16), std::max(1.0f, s));
             }
         }
-        ui::text_mid(c, c.f.heading, 23 * s, x + 28 * s, ty, shown ? ui::kInkBright : ui::kBannerInk, tab_titles[i]);
+        ui::text_mid(c, c.f.heading, 23 * ts, x + 28 * ts, ty, shown ? ui::kInkBright : ui::kBannerInk, tab_titles[i]);
         hits.add(x, 0, x + tw[i], hh, menu_hit::kTab, i);
         x += tw[i];
     }
@@ -1457,6 +1725,7 @@ void draw_options(ui::Ctx& c) {
     const int count = tab_row_count(cur_tab), sel = tab_selected[cur_tab];
     const Row& selr = rows[tab_row_to_global(cur_tab, sel)];
     const char* hint = selr.value && selr.hint ? selr.hint(*selr.value, -1) : nullptr;
+    if (cur_tab == TAB_DLSS5 && dlss_nr_issue() != dlss_nr::Issue::none) hint = dlss_nr::message(dlss_nr_issue());
     const std::string pending_line = (cur_tab == TAB_GRAPHICS || cur_tab == TAB_DEBUG) && restart_pending() ? restart_line(c, 16 * s, hx1 - hx0 - 66 * s) : "";
     static float help_tall = 0, help_tall_w = 0;
     if (help_tall_w != hx1 - hx0) help_tall_w = hx1 - hx0, help_tall = measure_help(c, hx1 - hx0 - 48 * s);
@@ -1464,7 +1733,8 @@ void draw_options(ui::Ctx& c) {
     const bool confirms = &selr == &rows[kRestartRow] || &selr == &rows[kQuitRow];
     ui::Prompt prompt_list[5] = {{ui::kUpDown, "Choose"}, {ui::kLeftRight, "Change"}, {ui::kTabs, "Tabs"}, {ui::kBack, "Close"}};
     int prompts_n = cur_tab == TAB_MOTION ? 3 : 4;
-    if (!selr.value) prompt_list[1] = {ui::kConfirm, confirms ? (pending == &selr ? "Confirm" : selr.name) : "Open"};
+    if (selr.tab == TAB_DLSS5 && !strcmp(selr.name,"Compare")) prompt_list[1] = {ui::kLeftRight, "Compare"};
+    else if (!selr.value) prompt_list[1] = {ui::kConfirm, confirms ? (pending == &selr ? "Confirm" : selr.name) : "Open"};
     if (cur_tab == TAB_MOTION) prompt_list[2] = {ui::kBack, "Back"};   // (Esc: to Controls)
     if (selr.cheat >= 0) {   // (a debug tool: Change when Left and Right do something, then what confirm does)
         prompts_n = 1;
@@ -1521,10 +1791,11 @@ void draw_options(ui::Ctx& c) {
             const bool fixed = row_fixed(r.value);
             const std::string lo = r.text(r.lo), hi = r.text(r.hi);
             const float half = (vb.x - va.x) * 0.5f - 18 * s;
-            if (is_slider(r)) {
+            if (is_slider(r) && !fixed) {
                 slider_cell(c, va, vb, r.text(*r.value), menu_hit::slider_permille(*r.value, r.lo, r.hi), selected, &t0, &t1);
-            } else if (r.hi - r.lo == r.step && !fixed && ui::size_of(c.f.strong, 18 * s, lo.c_str()).x <= half &&
-                       ui::size_of(c.f.strong, 18 * s, hi.c_str()).x <= half) {
+            } else if (r.value == &opts.dlss5_group ||
+                       (r.hi - r.lo == r.step && !fixed && ui::size_of(c.f.strong, 18 * s, lo.c_str()).x <= half &&
+                        ui::size_of(c.f.strong, 18 * s, hi.c_str()).x <= half)) {
                 halves_cell(c, va, vb, lo.c_str(), hi.c_str(), *r.value == r.hi, selected, fixed);
             } else {
                 const bool output_row = r.value == &opts.output_res;
@@ -1533,12 +1804,33 @@ void draw_options(ui::Ctx& c) {
                 choice_cell(c, va, vb, r.text(*r.value), selected, left, right, fixed);
             }
         }
-        hits.add(rx0, std::max(y, top - 8 * s), rx1, std::min(y + rh, bottom + 8 * s), menu_hit::kRow, i, va.x, vb.x, t0, t1);
+        if (!r.value || !row_fixed(r.value)) hits.add(rx0, std::max(y, top - 8 * s), rx1, std::min(y + rh, bottom + 8 * s), menu_hit::kRow, i, va.x, vb.x, t0, t1);
     }
     c.d->PopClipRect();
     ui::prompt_bar(c, prompt_list, prompts_n);   // (the prompts, on top of the help and the rows)
+
 }
 
+// Reserve an edge strip while previewing; the normal menu's layout and mouse map move together.
+void draw_options(ui::Ctx& c) {
+    if (!nr_toolbar_preview()) { draw_options_content(c); return; }
+    ui::Ctx k=c;
+    k.h=std::max(1.0f,c.h-100*c.s);
+    const float dy=opts.dlss5_compare_top ? c.h-k.h : 0;
+    c.d->AddDrawCmd();
+    const int v0=c.d->VtxBuffer.Size, cmd0=c.d->CmdBuffer.Size-1;
+    draw_options_content(k);
+    for (int i=v0;i<c.d->VtxBuffer.Size;++i) c.d->VtxBuffer[i].pos.y+=dy;
+    for (int i=cmd0;i<c.d->CmdBuffer.Size;++i) {
+        auto& clip=c.d->CmdBuffer[i].ClipRect;
+        clip.y=std::clamp(clip.y+dy,0.0f,c.h);
+        clip.w=std::clamp(clip.w+dy,0.0f,c.h);
+    }
+    for (int i=0;i<hits.n;++i) hits.box[i].y0+=dy,hits.box[i].y1+=dy;
+    hits.ay0=dy,hits.ay1=dy+k.h;
+    c.d->AddDrawCmd();
+    draw_nr_compare(c,true);
+}
 void draw_controls(ui::Ctx& c) {
     // (the page's own rows first, kTop of them (the layout preset, the button prompts), then a row per control and Reset to
     // defaults: one list, csel its selection)
@@ -1784,6 +2076,7 @@ float menu_ox = 0;   // (the menu's column's left edge in the window: more than 
 /// middle (a window of 16:9 or narrower: the whole of it). The pages draw from 0 as on 16:9; their vertices and clip
 /// rectangles are moved over after, and menu_tick moves the mouse back by menu_ox before it tests the hits
 void draw_menu(ui::Ctx& c) {
+    if (nr_comparison.active) { menu_ox = 0; hits.clear(0,0,c.w,c.h); draw_nr_compare(c,false); return; }
     c.d->AddRectFilled(ImVec2(0, 0), ImVec2(c.w, c.h), ui::rgba(8, 5, 2, ui::kDimAlpha));   // (the game behind, dimmed)
     ui::Ctx k = c;
     k.w = std::min(c.w, std::floor(c.h * 16.0f / 9.0f + 0.5f));
@@ -1810,16 +2103,34 @@ void draw_menu(ui::Ctx& c) {
 void draw_fps(ui::Ctx& c, bool under_banner) {
     const float s = c.s, px = 24 * s;
     const float nw = ui::size_of(c.f.heading, px, fps_text).x, sw = fps_sub[0] ? ui::size_of(c.f.body, 12.5f * s, fps_sub).x : 0;
-    const float bw = std::max(nw + 54 * s, sw + 24 * s), bh = fps_sub[0] ? 48 * s : 34 * s;
+    const bool nr = opts.dlss5_stats && (!open_now.load(std::memory_order_relaxed) || nr_comparison.active);
+    char details[3][96]{};
+    float bw = std::max(nw + 54 * s, sw + 24 * s);
+    const float header_h = fps_sub[0] ? 48 * s : 34 * s;
+    if (nr) {
+        const auto stats = dlss_nr_stats();
+        snprintf(details[0], sizeof details[0], "Frame %.2f ms", nr_present_fps > 0 ? 1000 / nr_present_fps : 0);
+        if (stats.gpu_ms >= 0) snprintf(details[1], sizeof details[1], "NR GPU %.3f ms", stats.active ? stats.gpu_ms : 0.0);
+        else snprintf(details[1], sizeof details[1], "NR GPU n/a");
+        if (stats.width && stats.height) snprintf(details[2], sizeof details[2], "NR %ux%u", stats.width, stats.height);
+        else snprintf(details[2], sizeof details[2], "NR resolution n/a");
+        for (const auto& line : details) bw = std::max(bw, ui::size_of(c.f.body, 12.5f * s, line).x + 24 * s);
+    }
+    const float bh = header_h + (nr ? 49 * s : 0);
     // (the window's top right corner, where it is in play; under the banner while the menu is open, unless the window is so
     // much wider than 16:9 that the plate fits beside the centred column's banner, in the corner)
     const bool beside = menu_ox >= bw + 2 * c.safe;
-    const ImVec2 a(c.w - c.safe - bw, under_banner && page != 5 && !beside ? banner_h(c) + 10 * s : c.safe), b = a + ImVec2(bw, bh);
+    float y = under_banner && page != 5 && !beside ? banner_h(c) + 10 * s : c.safe;
+    if (nr_comparison.active && opts.dlss5_compare_top) y = std::max(y, c.safe + 82 * s);
+    const ImVec2 a(c.w - c.safe - bw, y), b = a + ImVec2(bw, bh);
     c.d->AddRectFilled(a, b, ui::rgba(30, 23, 15, 236));
     c.d->AddRect(a, b, ui::kBoxEdge, 0, std::max(1.0f, s));
     ui::text_mid(c, c.f.heading, px, a.x + 12 * s, a.y + 17 * s, ui::rgba(246, 236, 214), fps_text);
     ui::text_mid(c, c.f.strong, 12 * s, a.x + 17 * s + nw, a.y + 17 * s, ui::kAccent, "FPS");
     if (fps_sub[0]) ui::text_mid(c, c.f.body, 12.5f * s, a.x + 12 * s, a.y + 37 * s, ui::kSoft, fps_sub);
+    if (nr)
+        for (int i = 0; i < 3; ++i)
+            ui::text_mid(c, c.f.body, 12.5f * s, a.x + 12 * s, a.y + header_h + (9 + 15 * i) * s, ui::kSoft, details[i]);
 }
 
 /// The start-up screen: the logo, the wordmark, what the start is doing, a bar, on a warm dark
@@ -1894,7 +2205,7 @@ void menu_init() {
     if (done) return;
     done = true;
     for (auto& count : item_counts) count.store(-1, std::memory_order_relaxed);
-    bool has_options = false;
+    bool has_options = false, has_nr = false, has_nr_profile = false;
     const char* cheats = getenv("HOS_OOT_CHEATS");
     cheats_env = cheats && !strcmp(cheats, "1");
     if (cheats_env) {
@@ -1911,10 +2222,17 @@ void menu_init() {
             char* eq = strchr(line, '=');
             if (!eq) continue;
             *eq = 0;
+            has_nr |= !strcmp(line, "dlss5");
+            has_nr_profile |= !strcmp(line, "dlss5_profile");
             for (Row& r : rows) {
                 if (!r.value || strcmp(line, ini_key(r))) continue;
-                const int v = atoi(eq + 1);
-                *r.value = r.value == &opts.output_res ? output_choice(v) : std::min(std::max(v, r.lo), r.hi);
+                char* end = nullptr;
+                const long long parsed = strtoll(eq + 1, &end, 10);
+                if (end == eq + 1) continue;
+                const int v = (int)std::clamp(parsed, (long long)INT_MIN, (long long)INT_MAX);
+                // Old Rendering/Masks/Diagnostics selections now all open General; Quality keeps index 1.
+                *r.value = r.value == &opts.dlss5_group ? (v == 1 ? 1 : 0) :
+                           r.value == &opts.output_res ? output_choice(v) : std::min(std::max(v, r.lo), r.hi);
             }
             has_resolution |= !strcmp(line, "resolution");
             v2 |= !strcmp(line, "options_version");
@@ -1954,6 +2272,18 @@ void menu_init() {
     if (const char* e = getenv("HOS_REALTIME_STEP")) opts.realtime = atoi(e) != 0;
     if (const char* e = getenv("HOS_DYNRES")) opts.resolution = atoi(e) != 0 ? 0 : 1;
     if (const char* e = getenv("HOS_OUTPUT_RES")) opts.output_res = output_choice(atoi(e));
+    if (!has_nr && getenv("RX_VK_DLSS_NR_DEFAULT")) opts.dlss5 = atoi(getenv("RX_VK_DLSS_NR_DEFAULT")) != 0;
+    if (const char* e = getenv("RX_VK_DLSS_NR")) opts.dlss5 = atoi(e) != 0;
+    if (const char* e = getenv("RX_VK_DLSS_NR_INTENSITY")) {
+        const float f = strtof(e, nullptr);
+        if (std::isfinite(f)) opts.dlss5_intensity = (int)(std::clamp(f, 0.0f, 2.0f) * 100.0f + 0.5f);
+    }
+    if (!opts.dlss && getenv("RX_VK_DLSS_START")) opts.dlss = 1;
+    if (!has_nr_profile) opts.dlss5_profile = opts.dlss5 ? dlss_nr::identify(nr_model(), opts.dlss5_color) : dlss_nr::Original;
+    if (has_nr_profile && opts.dlss5_profile == dlss_nr::Original) opts.dlss5 = 0;
+    if (opts.dlss5_profile > dlss_nr::Original && opts.dlss5_profile < dlss_nr::Custom &&
+        dlss_nr::identify(nr_model(), opts.dlss5_color) != opts.dlss5_profile) opts.dlss5_profile = dlss_nr::Custom;
+    nr_publish();
     restart_init();   // (what this run started with: the rows that take a restart differ from it once changed)
 }
 
@@ -1975,7 +2305,9 @@ void menu_set_gpu_count(int count) {
         if (rows[i].value == &opts.gpu_device) restart_state.restart_value(restart_slot[i], opts.gpu_device);
 }
 
-bool menu_is_open() { return open_now.load(std::memory_order_relaxed); }
+bool menu_is_open() { return open_now.load(std::memory_order_relaxed) || comparison_release.load(std::memory_order_relaxed); }
+bool menu_comparing() { return comparison_open.load(std::memory_order_relaxed); }
+bool menu_nr_editing() { return open_now.load(std::memory_order_relaxed) && cur_tab == TAB_DLSS5 && drag_row >= 0; }
 // (the tools off on the Debug tab: flight, the free camera and heart protection put away; -1, heart protection never set, is the
 // host's own HOS_OOT_PROTECT_HEARTS)
 int menu_heart_protection() {
@@ -2136,6 +2468,13 @@ void cheat_press(int i, const bool* press, bool& changed) {
 
 void menu_tick() {
     fullscreen_tick();
+    if (comparison_release.load()) {
+        bool down = false;
+        const int release_keys[] = {VK_F8,VK_RETURN,VK_ESCAPE,VK_INSERT,VK_F1,VK_LEFT,VK_RIGHT,VK_UP,VK_DOWN,VK_TAB,'Q','E'};
+        for (const int key : release_keys)
+            down |= (GetAsyncKeyState(key) & 0x8000) != 0;
+        if (!down && !nr_script_f8) comparison_release = false;
+    }
     {   // (the lists keep the choice in view when the drawing fits another number of lines: a resize, Menu size)
         static int seen = list_lines;
         if (list_lines != seen) seen = list_lines, teleport_reveal(), item_reveal();
@@ -2202,6 +2541,9 @@ void menu_tick() {
         char key[8];
         int n = 0;
         if (next && sscanf(next, "%lf:%7[A-Z]%n", &at, key, &n) == 2 && (prof_now() - start) / 1e9 >= at) {
+            if (!strcmp(key, "HOLD")) nr_script_f8 = true;
+            if (!strcmp(key, "RELEASE")) nr_script_f8 = false;
+            if (!strcmp(key, "COMPARE")) nr_script_f8_press = true;
             static const char* names[] = {"INS", "UP", "DOWN", "LEFT", "RIGHT", "ESC", "", "ENTER", "", "", "TABL", "TABR"};
             for (int i = 0; i < 12; i++) press[i] |= *names[i] && !strcmp(key, names[i]);
             static const char* pads[] = {"PADS", "PADE", "PADW", "PADN"};
@@ -2242,7 +2584,10 @@ void menu_tick() {
         restart_state.choose_later(now);
         open_now = false, page = 0, changed = true;
     };
-    if ((press[0] || press[6]) && open_now.load() && page == 5) {
+    if ((press[0] || press[6]) && nr_comparison.active) {
+        nr_compare_leave(false);
+        changed = true;
+    } else if ((press[0] || press[6]) && open_now.load() && page == 5) {
         later();
     } else if ((press[0] || press[6]) && open_now.load() && restart_ask()) {
         page = 5, ask_sel = 0, listening = 0, changed = true;
@@ -2256,7 +2601,63 @@ void menu_tick() {
         if (open_now.load()) dlss_probe();   // (whether the Upscaler row can offer DLSS here: NGX asked once)
         if (open_now.load()) refresh_mics();   // (the microphones as they are now)
     }
-    if (open_now.load() && page == 5) {   // (hookshot) the restart question: Later (the default) or Restart now
+    // Recoverable NR issues never open a menu, alter preferences, or create a modal.
+    static int64_t nr_next_check = 0;
+    static dlss_nr::Issue last_issue = dlss_nr::Issue::none;
+    if (prof_now() >= nr_next_check && (opts.dlss5 || (open_now.load() && cur_tab == TAB_DLSS5))) {
+        nr_next_check = prof_now() + 1000000000LL;
+        dlss_nr_check();
+    }
+    if (last_issue != dlss_nr_issue()) { last_issue = dlss_nr_issue(); changed = true; }
+    if (nr_comparison.active) {
+        const bool held = nr_script_f8 || (mine && ((GetAsyncKeyState(VK_F8) & 0x8000) || (raw & (1u << nr_shortcut_pad()))));
+        const bool queued = mine && host && host->take_key_press && host->take_key_press(VK_F8);
+        const bool was_on = nr_comparison.on;
+        nr_comparison.shortcut(held, queued || nr_script_f8_press, opts.dlss5_compare_mode != 0);
+        if (was_on != nr_comparison.on) {
+            if (nr_comparison.on && opts.dlss5_profile == dlss_nr::Original) opts.dlss5_profile = dlss_nr::identify(nr_model(), opts.dlss5_color);
+            changed = true;
+        }
+        nr_script_f8_press = false;
+        if (press[3] || tab_left) nr_compare_selected = (nr_compare_selected+5-1)%5, changed = true;
+        if (press[4] || tab_right) nr_compare_selected = (nr_compare_selected+1)%5, changed = true;
+        int adjust = press[1] ? 1 : press[2] ? -1 : 0;
+        bool activate = press[7];
+        const auto compare_hit = hits.at((float)mx,(float)my);
+        if (mouse && compare_hit.part == menu_hit::kNrButton) {
+            const int cell = compare_hit.index;
+            if (moved || ptr.pressed || ptr.wheel) nr_compare_selected = cell, changed = true;
+            if (ptr.pressed & HOS_MOUSE_LEFT) activate = true;
+            if (activate && compare_hit.side) adjust = compare_hit.side;
+        }
+        if (mouse && (ptr.pressed & HOS_MOUSE_RIGHT)) press[5] = true;
+        if (activate || adjust) {
+            const int dir = adjust ? adjust : 1;
+            switch (nr_compare_selected) {
+            case 0:
+                nr_comparison.toggle();
+                if (nr_comparison.on && opts.dlss5_profile == dlss_nr::Original) opts.dlss5_profile = dlss_nr::identify(nr_model(), opts.dlss5_color);
+                break;
+            case 1: opts.dlss5_intensity = std::clamp(opts.dlss5_intensity+dir*5, 0, 200); opts.dlss5_profile = dlss_nr::Custom; break;
+            case 2: {
+                int profile = (opts.dlss5_profile+dir+5)%5;
+                opts.dlss5_profile = profile;
+                nr_comparison.on = profile != dlss_nr::Original;
+                if (profile > dlss_nr::Original && profile < dlss_nr::Custom) nr_look(dlss_nr::look(profile));
+                break;
+            }
+            case 3: if (activate) nr_compare_leave(true); break;
+            case 4: if (activate) nr_compare_leave(false); break;
+            }
+            changed = true;
+            nr_publish();
+        }
+        if (press[5]) nr_compare_leave(false), changed = true;
+        if (nr_comparison.active) dlss_nr_compare(nr_comparison.override_for(held, opts.dlss5_compare_mode != 0));
+        static int64_t repaint = 0;
+        if (prof_now() >= repaint) repaint = prof_now()+150000000LL, changed = true;
+
+    } else if (open_now.load() && page == 5) {   // (hookshot) the restart question: Later (the default) or Restart now
         if (mouse) {   // (a button under the cursor chosen, a click on it pressed, a right click is Later; no list: the wheel does nothing)
             const menu_hit::Hit hit = hits.at((float)mx, (float)my);
             if (hit.part == menu_hit::kButton && (moved || ptr.pressed) && hit.index != ask_sel) ask_sel = hit.index, changed = true;
@@ -2448,6 +2849,10 @@ void menu_tick() {
                     Row& d = rows[tab_row_to_global(cur_tab, hit.index)];
                     if (!d.value && d.cheat >= 0 && cheat_chooses(d.cheat) && hit.side != 0)
                         press[hit.side < 0 ? 3 : 4] = true;   // (a tool's choice: its halves as Left and Right)
+                    else if (d.tab == TAB_DLSS5 && !strcmp(d.name, "Compare")) press[4] = true;
+                    else if (d.value == &opts.dlss5_group) {
+                        if (hit.side) press[hit.side < 0 ? 3 : 4] = true; // Click the named half, including when already selected.
+                    }
                     else if (!d.value) press[7] = true;   // (a page, a tool: as Enter)
                     else if (d.hi - d.lo == d.step || hit.side >= 0) press[4] = true;   // (a toggle flips; the right half, or the name, as Right)
                     else press[3] = true;                                               // (the left half as Left)
@@ -2503,6 +2908,13 @@ void menu_tick() {
                 }
             }
         } else if (r.cheat >= 0) cheat_press(r.cheat, press, changed);   // (a debug tool: on the Debug tab itself)
+        else if (r.tab == TAB_DLSS5 && !strcmp(r.name, "Compare")) {
+            if (press[4]) nr_compare_enter(), changed = true;
+        } else if (press[7] && r.tab == TAB_DLSS5 && !r.value) {
+            if (!strcmp(r.name, "Retry detection")) dlss_nr_retry();
+            else { nr_look({}); opts.dlss5_profile = opts.dlss5 ? dlss_nr::Balanced : dlss_nr::Original; opts.dlss5_history = opts.dlss5_debug = 0; nr_publish(); if (opts.dlss5) dlss_nr_retry(); save(); }
+            changed = true;
+        }
         else if (press[7] && is_motion_row(r)) cur_tab = TAB_MOTION, tab_selected[TAB_MOTION] = 0, press[7] = false, changed = true;
         else if (press[7] && !r.value && can_bind()) page = 1, csel = 0, ccol = 0, changed = true;
         if ((press[3] || press[4] || press[7]) && r.value) {   // (Enter, or A, as Right)
@@ -2533,11 +2945,12 @@ void menu_tick() {
             PostMessageA(app_window(), WM_APP + 8, (WPARAM)now_open, 0);
         }
     }
-    if (opts.show_fps) {
+    if (opts.show_fps || opts.dlss5_stats) {
         static int64_t next = 0, last_game = 0, last_shown = 0;
         const int64_t now = prof_now();
         double shown = 0, game = 0;
         if (fps_take(now, shown_frames.load(), game_frames.load(), &next, &last_shown, &last_game, &shown, &game)) {
+            nr_present_fps = shown;
             snprintf(fps_text, sizeof fps_text, "%.0f", shown);
             if (opts.framegen >= 1) snprintf(fps_sub, sizeof fps_sub, "game %.0f", game);
             else fps_sub[0] = 0;
@@ -2547,9 +2960,9 @@ void menu_tick() {
 
 void menu_record(VkCommandBuffer cmd, uint32_t index, uint32_t w, uint32_t h) {
     const bool start = startup_on.load(std::memory_order_acquire);
-    const bool fps = opts.show_fps && !start;   // (no game frames yet: not "0 FPS" over the start-up screen)
     const bool open = open_now.load(std::memory_order_relaxed);
-    if (!start && !fps && !open) {   // (nothing shows: no ImGui frame, no render pass)
+    const bool fps = (opts.show_fps || (opts.dlss5_stats && (!open || nr_comparison.active))) && !start;
+    if (!start && !fps && !open && !opts.dlss5_stats) {   // (nothing shows: no ImGui frame, no render pass)
         // (but a new window size or Menu size since the last bake: one frame with nothing drawn that bakes the menu's glyphs
         // and measures its page for the new size, so the next open has no hitch whatever was resized while nothing showed)
         if (prebake_needed(w, h) && ui::begin(w, h)) {
@@ -2572,18 +2985,18 @@ void menu_record(VkCommandBuffer cmd, uint32_t index, uint32_t w, uint32_t h) {
     prebake(c);   // (the menu's glyphs at this size, before it opens: no hitch then)
     if (start) draw_startup(c);   // (under the menu)
     if (open) draw_menu(c);
-    if (fps) draw_fps(c, open);
+    if (fps) draw_fps(c, open && !nr_comparison.active);
     ui::record(cmd, index, w, h);
 }
 
 void menu_record_image(VkCommandBuffer cmd, VkImage image, VkImageView view, uint32_t w, uint32_t h) {
     const bool open = open_now.load(std::memory_order_relaxed);
-    const bool fps = opts.show_fps && !startup_on.load(std::memory_order_acquire);
-    if (!open && !fps) return;
+    const bool fps = (opts.show_fps || (opts.dlss5_stats && (!open || nr_comparison.active))) && !startup_on.load(std::memory_order_acquire);
+    if (!open && !fps && !opts.dlss5_stats) return;
     if (!ui::begin(w, h)) return;
     ui::Ctx c = ui_ctx(w, h);
     if (open) draw_menu(c);
-    if (fps) draw_fps(c, open);
+    if (fps) draw_fps(c, open && !nr_comparison.active);
     ui::record_to(cmd, image, view, w, h);
 }
 
