@@ -41,6 +41,7 @@ using namespace mkwvk;
     # Keep NR helper types/functions in their production namespace.
     fixture=fixture.replace('using namespace mkwvk;','namespace mkwvk {\n'+options+'\n'+controls+r"""
 Options opts, saved;
+int saved_value(int* value) { return *value; }
 DlssNrControls published;
 std::atomic<bool> open_now{true};
 bool menu_refresh=false;
@@ -76,6 +77,8 @@ void load_line(const char* input) {
     fixture+=block(menu,'void nr_compare_enter() {')+'\n'+block(menu,'void nr_compare_leave(bool commit) {')+r"""
 void save() { ++saves; saved=opts; }
 struct Out { unsigned w, h; };
+Out player_custom_output{}; constexpr int kCustomOutput = 6;
+bool env_holds(const int*) { return false; }
 Out output_at(int) { return {2048, 1152}; }
 void save_rows_to(FILE* f) {
 SAVE_ROWS
@@ -84,6 +87,11 @@ SAVE_ROWS
 using namespace mkwvk;
 int main() {
     static_assert(TAB_DLSS5 >= TAB_COUNT && TAB_DLSS5 != TAB_MOTION);
+    opts.show_fps = 0;
+    opts.dlss5 = 1;
+    opts.dlss5_intensity = 45;
+    load_line("dlss5_stats=1"); // An obsolete overlay preference cannot enable FPS or change NR.
+    assert(opts.show_fps == 0 && opts.dlss5 == 1 && opts.dlss5_intensity == 45);
     for (int current : {0, 1}) for (int dir : {-1, 1}) {
         opts.dlss5_group=current;
         int next=current+dir;

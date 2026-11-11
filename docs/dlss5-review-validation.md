@@ -93,3 +93,51 @@ been exhaustively verified. The earlier Windows exit/TDR report remains an
 open limitation; this follow-up does not claim a general shutdown fix.
 Native Linux NR has no known compatible runtime and remains capability
 probing/fallback, not verified Linux GPU support.
+
+## Main integration on 11 November 2026
+
+Integrated 144 upstream commits through
+`2ed98c46843b37a45b9afec531aba5abcd579e1a`, preserving the new direct NGX
+Frame Generation, HDR SR, rounded render ranges, runtime control bridge,
+environment overrides and FPS-counter levels/graph/corner selection.
+
+The NR Statistics option and its GPU timestamp queries have been removed.
+The FPS counter keeps upstream's rendering, levels and selected corner; old
+`dlss5_stats` preferences are ignored and removed on the next save.
+The control bridge has a DLSS 5 submenu name;
+NR model drags publish an atomic flag for the render thread. NGX initialization
+is serialized for the background probe, SR/NR and the new FG caller. Native
+HDR bypasses the SDR-only NR/composite path without disturbing SR history.
+Temporary environment values remain temporary when settings are saved.
+
+Windows NGX renderer and complete isolated game built successfully (the game
+build took 5:03, including 1:56 compilation with existing local object caches).
+The no-NGX Windows DLSS object also compiled. The full game-free suite ended
+with **377 passed, 5 failed, 30 skipped**. NR, affected menu/environment,
+control bridge, HDR and shader checks passed. Remaining failures were the
+three .NET SDK-dependent checks, Windows link-privilege extraction fixtures,
+and the previously observed recorder negative exit fixture. No assertions
+were removed to hide these failures.
+
+The Linux check could not run: Docker's Linux engine pipe was unavailable,
+including after attempting to start the installed Docker Desktop. Previous
+Linux object checks above apply to the earlier revision, not this merge.
+The contributor approved the menu in the running game, then requested removal
+of Statistics before publication. No screenshots or generated previews are used.
+
+Four further upstream commits through `d8f4a173dafb3dc20553145e37d6dbf46dccc91b`
+were integrated before publication, retaining the new reactive mask, VRAM
+budget row and DLSS size diagnostics. The NR settings migration coexists with
+the new memory-budget migration. The reactive mask still feeds SR independently
+of NR; it is not presented as a semantic NR control mask.
+
+Final Windows NGX renderer link and no-SDK DLSS object compile passed after
+Statistics removal. The complete suite passed **379 checks, with 6 failures
+and 30 skips**. NR, FPS overlay ordering, reactive-mask and affected menu
+checks passed, including loading the retired `dlss5_stats=1` preference
+without enabling FPS or changing NR. The additional failure is the new
+`test_vram_budget_row.py` fixture's unused `kVramMinimumOnly` constant under
+llvm-mingw clang 23 with `-Werror`; it reproduces identically from unmodified
+upstream `d8f4a173` sources. The other five failures have the causes listed
+above. No test assertions were weakened. The rebuilt renderer was staged in
+the isolated game folder; this last removal has not had another GPU play test.

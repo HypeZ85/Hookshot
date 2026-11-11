@@ -16,9 +16,13 @@ Each is a runtime switch where it can be, so the game's own path stays reachable
   before any recompute. So the fixed path kept the dynamic path's last scale (0.75 docked: 1536x864 at every setting). Flag 1 now
   also asks for the recompute, and on the fixed path the flags +0xe20 bits 3/4 (a hardcoded 0.75 / 0.5 in place of the scale)
   are not looked at.
+- Camera speed (the Insert menu's "Camera speed", the supported build only): the player camera's update (f_80644c80) turns the
+  camera each frame by the speeds the right stick's turn functions return in s0; hos_camera_scale multiplies them at each of
+  their returns, 1.0 as shipped. Even the fastest of the game's own camera speeds turned slowly for players.
 """
 import glob
 import os
+import re
 import sys
 import whole_write   # (rewrites written beside and moved over: issue 1197)
 
@@ -125,6 +129,46 @@ def patch_view(source):
     return (source[:start] + body + source[end:]).replace(
         '#include "a64.h"\n', '#include "a64.h"\nextern void hos_oot_free_view(Ctx *c, uint64_t view);\n', 1)
 
+# Movement speed (the Debug tab's row, host/hos_main.c hos_oot_cct_speed): a character controller's forward speed (s0), on its way
+# to *(controller+40)+472, which the physics step moves the body by with its collisions. The host scales it for Link's controller
+# while the row is above 1x. Three places set it: f_809552f0, the move Link's own walk, run and swim go through (a direction at
+# x1, the speed in metres a frame), at its two calls of the setter, each after it took the controller into x0; and the setter
+# itself, f_80559df0 (the controller's vtable +0x70), with f_80964bf0, which takes the CCT component and inlines that setter
+# (OneShotPhysicsCctSetForwardSpeedMpf and others). The first inlines the setter too, so no speed is scaled twice. Only a walk's,
+# run's or swim's speed is scaled: a climb up a ledge goes through f_809552f0 too, at some 55 m/s for a frame, and scaled it threw
+# Link past the ledge.
+SPEED_HOOK = ("    hos_oot_cct_speed(c, c->x[0], %d);   /* (nx2/oot_patches.py: movement speed; x0 the controller, s0 the speed, "
+              "in metres a %s) */\n")
+SPEED_PLACES = (   # (the function's head, the text in it the hook follows, and 1 when s0 is a second's speed, 0 a frame's)
+    ("void f_809552f0(Ctx *__restrict A64_NOESC c) {\n", "L_80955424:;\n    c->x[0]=recomp_load64(c,c->x[8] + 8);\n", 0),
+    ("void f_809552f0(Ctx *__restrict A64_NOESC c) {\n", "L_809554dc:;\n    c->x[0]=recomp_load64(c,c->x[8] + 8);\n", 0),
+    ("void f_80559df0(Ctx *__restrict A64_NOESC c) {\n", "void f_80559df0(Ctx *__restrict A64_NOESC c) {\n", 1),
+    ("void f_80964bf0(Ctx *__restrict A64_NOESC c) {\n", "void f_80964bf0(Ctx *__restrict A64_NOESC c) {\n    c->x[0]=recomp_load64(c,c->x[0] + 8);\n", 1),
+)
+
+
+def patch_cct_speed(source):
+    """The forward speed's places in this file hooked: (source, how many are hooked now), None when none of them is here"""
+    if not any(head in source for head, _, _ in SPEED_PLACES):
+        return None
+    n = 0
+    for head, anchor, per_second in SPEED_PLACES:
+        hook = SPEED_HOOK % (per_second, "second" if per_second else "frame")
+        start = source.find(head)
+        if start < 0:
+            continue
+        end = source.find("\n}", start)
+        body = source[start:end]
+        if body.count(anchor + hook) == 1:
+            n += 1
+        elif end >= 0 and body.count(anchor) == 1:
+            source = source[:start] + body.replace(anchor, anchor + hook, 1) + source[end:]
+            n += 1
+    if n and "extern void hos_oot_cct_speed(" not in source:
+        source = source.replace('#include "a64.h"\n', '#include "a64.h"\nextern void hos_oot_cct_speed(Ctx *c, uint64_t controller, int per_second);\n', 1)
+    return source, n
+
+
 # Native mouse look (host/mouse_native.c): the player camera's update, f_80644c80 (a virtual method, the camera in x0), hands
 # its camera to the host before anything else, on the game's thread, once a frame; with the menu's Mouse camera on the mouse's
 # motion turns the camera's yaw (+0x1a4) and pitch (+0x18c) there, before the camera reads its input.
@@ -201,6 +245,48 @@ def patch_menu_tick(source):
     hook = "    hos_oot_menu_tick(c, c->x[0]);   /* (nx2/oot_patches.py: the menus' mouse) */\n"
     return (source[:at] + hook + source[at:]).replace(
         '#include "a64.h"\n', '#include "a64.h"\nextern void hos_oot_menu_tick(Ctx *c, uint64_t screen);\n', 1)
+
+
+TEXT_DRAW_HEAD = "void f_8152b670(Ctx *__restrict A64_NOESC c) {\n"
+TEXT_LAYOUT_HEAD = "void f_8152aec0(Ctx *__restrict A64_NOESC c) {\n"
+GLYPH_HEAD = "void f_81680c60(Ctx *__restrict A64_NOESC c) {\n"
+
+
+def _hook_head(source, head, call, decl):
+    """call put first in the function that starts with head, once, and decl declared; None without the function"""
+    start = source.find(head)
+    if start < 0:
+        return None
+    if call.split("(")[0] + "(" in source:   # (made before: a lift patched again)
+        return source
+    at = start + len(head)
+    return (source[:at] + call + source[at:]).replace('#include "a64.h"\n', '#include "a64.h"\n' + decl, 1)
+
+
+def patch_text_draw(source):
+    """f_8152b670, a text box's draw (x0 the box: each time the game shows it), calls hos_prompts_text_draw first with the box: the
+    button prompts changed while the game runs, the box's codes for them rewritten and the box marked to be laid out again
+    (host/prompts.c)"""
+    return _hook_head(source, TEXT_DRAW_HEAD,
+                      "    hos_prompts_text_draw(c->x[0]);   /* (nx2/oot_patches.py: the button prompts changed) */\n",
+                      "extern void hos_prompts_text_draw(uint64_t box);\n")
+
+
+def patch_text_layout(source):
+    """f_8152aec0, a text box's layout (x0 the box: it lays its text out again when its status says so, at +8: bit 0x20000),
+    calls hos_prompts_text_layout first with the box: the button prompts changed while the game runs, the box's codes for them
+    rewritten and the box laid out again (host/prompts.c)"""
+    return _hook_head(source, TEXT_LAYOUT_HEAD,
+                      "    hos_prompts_text_layout(c->x[0]);   /* (nx2/oot_patches.py: the button prompts changed) */\n",
+                      "extern void hos_prompts_text_layout(uint64_t box);\n")
+
+
+def patch_glyph(source):
+    """f_81680c60, FreeType's ft_smooth_render (x1 the glyph slot), calls hos_prompts_glyph first with the slot: where the game
+    keeps the button prompts' font, for a change while it runs (host/prompts.c)"""
+    return _hook_head(source, GLYPH_HEAD,
+                      "    hos_prompts_glyph(c->x[1]);   /* (nx2/oot_patches.py: where the button prompts' font is) */\n",
+                      "extern void hos_prompts_glyph(uint64_t slot);\n")
 
 
 TEXT_HEAD = "void f_80b1e140(Ctx *__restrict A64_NOESC c) {"
@@ -303,6 +389,64 @@ def patch_movie_frames(s):
     return s if MOVIE_DECL in s else s.replace('#include "a64.h"\n', '#include "a64.h"\n' + MOVIE_DECL, 1)
 
 
+# Counters that add the frame step, or the step times a whole number, cut to whole frames (host/frame_whole.h). At 60 fps the step
+# is 1; under a Frame rate cap above 60 it is the frame's own time, under 1 (0.42 at 144 fps), and the cut is 0 every frame:
+# - f_80a87e50, the pick-up indicator above Link's head (a rupee, a Deku Stick): the count it shows (+864) moves toward the
+#   wallet's (+860) by (int)(step * max(distance / 50, 1)) and the indicator fades when they meet. Cut to 0, it stayed at the old
+#   count until a door or a talk replaced it (issue 1832).
+# - f_800672e0, the water renderer: its ripple simulation runs (int)step times the water's substeps (+76 of the pass) each frame.
+#   Cut to 0, the rings Link and the actors make in water stood still above 60 fps. Found by atk3001 for Lichii (zortos293/
+#   Lichii#1152), as ported to Fritchii (Frizti/Fritchii d389685a4, 063dbb741): its remainder is kept per water object (x21).
+# hos_frame_whole carries the fractions per counter while the frames' own time is the step, so each moves at the game's rate;
+# otherwise it cuts as the game does. A site is added here once it is seen to misbehave in game. (A site's function, its code to
+# replace, and the counter's address for its remainder.)
+WHOLE_SITES = (
+    # (the cut alone, the function's one: the multiply before it is a64_fpx_hot_mul32_fma32 in a lift where the function is
+    # among A64_HOT_FUNCS)
+    ("void f_80a87e50(Ctx *__restrict A64_NOESC c) {@",
+     "    c->x[12]=recomp_fp_to_int(c->vreg[0][0]&UINT64_C(0xffffffff),32,32,1,3,c->fpcr,&c->fpsr);@",
+     "c->x[19] + 864"),
+    # (the cut alone, the function's one)
+    ("void f_800672e0(Ctx *__restrict A64_NOESC c) {@",
+     "    c->x[9]=recomp_fp_to_int(c->vreg[0][0]&UINT64_C(0xffffffff),32,32,1,3,c->fpcr,&c->fpsr);@",
+     "c->x[21]"),
+)
+WHOLE_SITES = tuple((h.replace("@", "\n"), o.replace("@", "\n"), k) for h, o, k in WHOLE_SITES)
+WHOLE_MARK = "/* (the step's whole frames: nx2/oot_patches.py) */"
+WHOLE_DECL = "extern uint32_t hos_frame_whole(uint64_t at, uint32_t amount_bits);\n"
+
+
+def whole_new(old, key):
+    """old with its cut to whole frames (the one recomp_fp_to_int) made hos_frame_whole's for the counter at key"""
+    lines = old.split("\n")
+    for i, line in enumerate(lines):
+        if "recomp_fp_to_int(c->vreg[0][0]" in line:
+            reg = line.split("=", 1)[0]
+            lines[i] = "%s=hos_frame_whole(%s, (uint32_t)c->vreg[0][0]);   %s" % (reg, key, WHOLE_MARK)
+    return "\n".join(lines)
+
+
+def patch_whole_frames(s):
+    """The counters of WHOLE_SITES take hos_frame_whole's whole frames: (s, the sites patched here). A file without the function,
+    one patched before, or one whose code differs (another game version) is left as it is."""
+    done = 0
+    for head_text, old, key in WHOLE_SITES:
+        head = s.find(head_text)
+        if head < 0:
+            continue
+        end = s.find("\n}\n", head)
+        body = s[head:end if end >= 0 else len(s)]
+        new = whole_new(old, key)
+        if new in body or body.count(old) != 1:
+            continue
+        at = head + body.index(old)
+        s = s[:at] + new + s[at + len(old):]
+        done += 1
+    if done and WHOLE_DECL not in s:
+        s = s.replace('#include "a64.h"\n', '#include "a64.h"\n' + WHOLE_DECL, 1)
+    return s, done
+
+
 def patch_text_speed(s):
     """The scale at the head of the letters' block of f_80b1e140 (Text speed), and the call to hos_oot_text_pane after it
     (Text size: host/oot_text_size.c); None when the file has no such function, s unchanged when the
@@ -312,7 +456,7 @@ def patch_text_speed(s):
         return None
     end = s.find("\nvoid f_", head + len(TEXT_HEAD))
     body = s[head:end if end >= 0 else len(s)]
-    for old in (TEXT_OLD_POLLED, TEXT_OLD):   # (with the interrupt poll before the block's backward goto, or without: --no-polls)
+    for old in (TEXT_OLD_POLLED, TEXT_OLD):   # (with the interrupt poll before the block's backward goto, or without: a lift run by hand with nx2/lift.py --no-polls)
         if old + TEXT_ADD in body:   # (applied already: a second run)
             return s
         if body.count(old) == 1:
@@ -326,22 +470,60 @@ def patch_text_speed(s):
     return s.replace('#include "a64.h"\n', '#include "a64.h"\n' + TEXT_DECL, 1)
 
 
+# Camera speed (host/nn_vi.c hos_camera_scale: the Insert menu's Camera speed, 1.0 as shipped). The player camera's update
+# (f_80644c80) multiplies the right stick into the turn of each frame by a speed each of these returns in s0:
+# - f_80643f10: the yaw's, the entry of the game's own camera speed option (options +0x254) in its speed table, times a factor;
+# - f_80643b60: the pitch's, the same option's entry in the other table;
+# - f_82ea21f0, f_82ea2220: the same two at level 2, the path taken while the stick's actor has the flag at +0x218.
+# None of them calls another, so each turn is scaled once. Only the supported build's functions have these names (apply).
+CAMERA_SPEED_HEADS = tuple("void f_%x(Ctx *__restrict A64_NOESC c) {" % a for a in (0x80643f10, 0x80643b60, 0x82ea21f0, 0x82ea2220))
+CAMERA_SPEED_DECL = "extern volatile float hos_camera_scale;\n"
+CAMERA_SPEED_RETURN = ("{ if (hos_camera_scale != 1.0f) { float _t; uint32_t _u; memcpy(&_t,c->vreg[0],4); _t *= hos_camera_scale; "
+                       "memcpy(&_u,&_t,4); a64_vset64(c->vreg[0],_u); } return; }   /* (nx2/oot_patches.py: camera speed) */")
+
+
+def patch_camera_speed(s):
+    """Each return of the camera's turn-speed functions scales s0 by hos_camera_scale: (s, the functions of s that do, made now
+    or by an earlier run). A function without a return is left as it is."""
+    found = 0
+    for head_text in CAMERA_SPEED_HEADS:
+        head = s.find(head_text)
+        if head < 0:
+            continue
+        end = s.find("\nvoid f_", head + len(head_text))
+        end = end if end >= 0 else len(s)
+        body = s[head:end]
+        if CAMERA_SPEED_RETURN not in body:   # (not made before: a lift patched again keeps its scale once)
+            body, n = re.subn(r"\breturn;", lambda _: CAMERA_SPEED_RETURN, body)
+            if not n:
+                continue
+            s = s[:head] + body + s[end:]
+        found += 1
+    if found and CAMERA_SPEED_DECL not in s:
+        s = s.replace('#include "a64.h"\n', '#include "a64.h"\n' + CAMERA_SPEED_DECL, 1)
+    return s, found
+
+
 def apply(gen, *, protect_hearts=False, required=False):
     """required: the lift of the supported build (LIFE_BUILD_ID), whole: a missing output-size edit stops it (apply_output_size).
     The other patches only warn when their place is not found once."""
-    import oot_native_resolution   # (HOS_SCENE_NATIVE=1: the scene's base scale 1.0; off by default since #849's output resolution)
-    oot_native_resolution.apply(gen)
     done = {"dynamic resolution branch": 0, "text speed block": 0, "fixed path's scale": 0, "movie's frame count": 0}
     if protect_hearts:   # (the supported build's: these places are its functions)
         done["menu focus hook"] = 0
         done["menu tick hook"] = 0
+        done["text draw hook"] = 0
+        done["glyph hook"] = 0
+        done["text layout hook"] = 0
         done["player heart protection"] = 0
         done["player flight"] = 0
         done["player flight rotation"] = 0
         done["free camera"] = 0
         done["mouse camera"] = 0
         done["disable camera centering"] = 0
+    speed_hooks = 0   # (SPEED_PLACES', in one file or several)
+    camera_speed = 0   # (the turn-speed functions that scale by hos_camera_scale: patch_camera_speed)
     step_sites, step_files = 0, []   # (the divides with the hook, and the files that have it)
+    whole_sites = 0   # (the counters of WHOLE_SITES with the whole frames: patch_whole_frames)
     for path in sorted(glob.glob(os.path.join(glob.escape(gen), "code_*.c"))):
         with open(path, encoding="utf-8", newline="") as f:
             s = f.read()
@@ -366,6 +548,21 @@ def apply(gen, *, protect_hearts=False, required=False):
             out = tick
             done["menu tick hook"] += 1
             print("oot_patches: the menus' update hook in", os.path.basename(path))
+        draw = patch_text_draw(out) if protect_hearts else None
+        if draw is not None:
+            out = draw
+            done["text draw hook"] += 1
+            print("oot_patches: the text boxes' draw hook in", os.path.basename(path))
+        glyph = patch_glyph(out) if protect_hearts else None
+        if glyph is not None:
+            out = glyph
+            done["glyph hook"] += 1
+            print("oot_patches: the glyphs' hook in", os.path.basename(path))
+        layout = patch_text_layout(out) if protect_hearts else None
+        if layout is not None:
+            out = layout
+            done["text layout hook"] += 1
+            print("oot_patches: the text boxes' layout hook in", os.path.basename(path))
         movie = patch_movie_frames(out)
         if movie is not None:
             if MOVIE_NEW in movie:   # (made now, or by an earlier run over this file)
@@ -402,22 +599,43 @@ def apply(gen, *, protect_hearts=False, required=False):
             out = center
             done["disable camera centering"] += 1
             print("oot_patches: disable camera centering switch in", os.path.basename(path))
+        speed = patch_cct_speed(out) if protect_hearts else None
+        if speed is not None:
+            if speed[0] != out:
+                print("oot_patches: movement speed in", os.path.basename(path))
+            out = speed[0]
+            speed_hooks += speed[1]
         view = patch_view(out) if protect_hearts else None
         if view is not None:
             out = view
             done["free camera"] += 1
             print("oot_patches: free camera in", os.path.basename(path))
+        if protect_hearts:   # (found by name alone: in another build these addresses are other functions)
+            made, n = patch_camera_speed(out)
+            camera_speed += n
+            if made != out:
+                out = made
+                print("oot_patches: camera speed at %d function(s) in %s" % (n, os.path.basename(path)))
         out, sites = patch_frame_seconds(out)
         if STEP_MARK in out:   # (made now, or by an earlier run over this file)
             step_sites += out.count(STEP_MARK)
             step_files.append(path)
         if sites:
             print("oot_patches: the frame's time at %d step divide(s) in %s" % (sites, os.path.basename(path)))
+        out, whole = patch_whole_frames(out)
+        whole_sites += out.count(WHOLE_MARK)   # (made now, or by an earlier run over this file)
+        if whole:
+            print("oot_patches: %d frame counter(s) with the step's whole frames in %s" % (whole, os.path.basename(path)))
         if out != s:
             whole_write.write_whole(path, out, newline="")
     for what, n in done.items():
         if n != 1:
             print("oot_patches: WARNING: the %s was found %d times" % (what, n))
+    if protect_hearts and speed_hooks != len(SPEED_PLACES):
+        print("oot_patches: WARNING: the movement speed's places were found %d times, not %d" % (speed_hooks, len(SPEED_PLACES)))
+    if protect_hearts and camera_speed != len(CAMERA_SPEED_HEADS):
+        print("oot_patches: WARNING: the camera's turn speed was found in %d of %d functions (the Camera speed row turns only "
+              "those)" % (camera_speed, len(CAMERA_SPEED_HEADS)))
     if step_sites != len(STEP_SITES):
         # (both or neither: with one divide timed and the other stepping 1/60 s the two clocks of the game would run apart. Without
         # the hook the host keeps the rate up to the cap, as before: host/nn_vi.c, hos_step_probe)
@@ -427,6 +645,9 @@ def apply(gen, *, protect_hearts=False, required=False):
             whole_write.write_whole(path, unpatch_frame_seconds(s), newline="")
         print("oot_patches: WARNING: the frame's time was found at %d of %d step divides, none patched (a Frame rate cap above 60 "
               "keeps the game's own step)" % (step_sites, len(STEP_SITES)))
+    elif whole_sites != len(WHOLE_SITES):   # (the frames' own time without them: the pick-up indicator stays above 60 fps)
+        print("oot_patches: WARNING: %d of %d frame counters found for the step's whole frames (above 60 fps a counter can stop: "
+              "the pick-up indicator)" % (whole_sites, len(WHOLE_SITES)))
     apply_output_size(gen, required=required)
 
 

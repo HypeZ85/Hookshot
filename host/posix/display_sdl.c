@@ -22,6 +22,9 @@
 #include "../display_pointer.h"
 #include <math.h>
 #include <limits.h>
+#ifndef HOOKSHOT_ENV_H   /* (env_on: the switches' one rule) */
+#include "../../gpu/vk/compat/hookshot_env.h"
+#endif
 
 int rx_start(void *hwnd);
 void rx_resize(int width, int height);
@@ -125,11 +128,15 @@ static volatile int refresh_now;
 static int refresh_mhz(void *w) { (void)w; return __atomic_load_n(&refresh_now, __ATOMIC_RELAXED); }
 static MkwVkWindow vk_window = {MKWVK_WINDOW_VERSION, create_surface, drawable_size, NULL, refresh_mhz};
 
+/* Esc let the captured mouse go just before it opened the Insert menu (Menu shortcut "Insert, F1 or Esc"):
+   the capture that comes back when the menu closes. Spent by the next capture or menu */
+static int esc_had_capture;
 static void mouse_capture(int on) {
     if (on == (int)mouse_captured) return;
     mouse_captured = on;
     InterlockedExchange(&mouse_dx, 0);
     InterlockedExchange(&mouse_dy, 0);
+    if (on) esc_had_capture = 0;
     hos_sdl_relative_mouse(window, on);
 }
 static void set_fullscreen(int on) {
@@ -170,19 +177,23 @@ static volatile int close_asked;             /* (the Insert menu's Quit: likewis
 /* PostMessageA to the window (host/posix/win32_posix.c): WM_APP + 7, the Insert menu's Fullscreen row, WM_APP + 8 the
    menu opened or closed, WM_APP + 9 its Restart now, WM_CLOSE its Quit (host/display.c's) */
 __attribute__((visibility("default"))) void hos_posix_post_message(uint32_t msg, uintptr_t wp, intptr_t lp) {
-    (void)lp;
     if (msg == WM_APP + 7) __atomic_store_n(&fullscreen_asked, wp ? 1 : 0, __ATOMIC_RELEASE);
-    if (msg == WM_APP + 8) __atomic_store_n(&menu_asked, wp ? 1 : 0, __ATOMIC_RELEASE);
+    if (msg == WM_APP + 8) {
+        /* Keep the opening reason in the same atomic as the requested state. */
+        __atomic_store_n(&menu_asked, !wp ? 0 : 1 + (lp != 0), __ATOMIC_RELEASE);
+    }
     if (msg == WM_APP + 9) __atomic_store_n(&restart_asked, 1, __ATOMIC_RELEASE);
     if (msg == WM_CLOSE) __atomic_store_n(&close_asked, 1, __ATOMIC_RELEASE);
 }
 /* the menu opened: the mouse let go (its capture kept for later); closed: the capture back, if the window still has the focus */
 static int captured_before_menu;
-static void menu_mouse(int open) {
+static void menu_mouse(int request) {
+    const int open = request != 0;
     if (open == menu_open) return;
     menu_open = open;
     if (open) {
-        captured_before_menu = (int)mouse_captured;
+        captured_before_menu = (int)mouse_captured || (request == 2 && esc_had_capture);   /* (opened by Esc, which let it go) */
+        esc_had_capture = 0;
         mouse_capture(0);
         hos_pointer_reset(&pointer);
         pointer_update(0, 0);
@@ -197,7 +208,7 @@ int hos_display_owns_sdl(void) { return sdl_ready; }   /* (controllers stay on t
 /* main(), before the game: SDL's video on this, the main, thread; the screen's size for GetSystemMetrics.
    Returns 1 when ready, 0 for explicit headless, -1 for startup failure. */
 int hos_display_init(void) {
-    if (getenv("HOS_HEADLESS")) return 0;
+    if (env_on("HOS_HEADLESS")) return 0;
     if (!hos_sdl_load()) {
         hos_log("display: no SDL: no window");
         fprintf(stderr, "display: no SDL: no window\n");
@@ -232,7 +243,7 @@ int hos_display_init(void) {
 
 /* the game's thread, when NVN is up (hos_main.c): the window is made on the main thread, which waits for this */
 void hos_display_start(void) {
-    if (getenv("HOS_HEADLESS") || !sdl_ready) {   /* no window: the renderer still draws, offscreen (screenshots) */
+    if (env_on("HOS_HEADLESS") || !sdl_ready) {   /* no window: the renderer still draws, offscreen (screenshots) */
         rx_start(NULL);
         return;
     }
@@ -302,6 +313,7 @@ void hos_display_loop(void) {
                     break;
                 case HOS_SDL_EV_FOCUS_LOST:
                     hos_posix_window[0] = 0;
+                    esc_had_capture = 0;
                     mouse_capture(0);
                     ptr_in = 0, ptr_held = 0;
                     break;
@@ -317,7 +329,10 @@ void hos_display_loop(void) {
                     break;
                 case HOS_SDL_EV_KEY_DOWN: {
                     const int scancode = e.scancode, mod = e.mod;
-                    if (e.scancode == 41) mouse_capture(0);   /* Esc */
+                    if (e.scancode == 41) {   /* Esc (it may open the Insert menu too: the capture comes back) */
+                        if (!menu_open && mouse_captured) esc_had_capture = 1;
+                        mouse_capture(0);
+                    }
                     if (!e.repeat && ((scancode == 68 && !(mod & 0x0FC3)) || (scancode == 40 && (mod & 0x300)))) set_fullscreen(!fullscreen);   /* F11, Alt+Enter */
                     break;
                 }

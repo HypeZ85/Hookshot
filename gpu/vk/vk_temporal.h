@@ -22,6 +22,10 @@ int temporal_mode();
 /// (vk_fsr3.cpp fsr3_wanted). Where it cannot run, a saved FSR 3.1 stays
 bool temporal_env_chosen();
 bool temporal_wanted();       // (temporal_mode() != GAME)
+/// The Upscaler row's Off (upscaler_rows.h OFF) with no engine running over it for this run (temporal_mode() is GAME): no
+/// upscaler at all. temporal_upscale then leaves the game's network out too and stretches its input to its output with a plain
+/// linear filter
+bool temporal_off();
 /// DLAA or FSR's native anti-aliasing: the 3D drawn at full scale, whatever the Render resolution row says
 bool temporal_full_scale();
 
@@ -55,7 +59,8 @@ void temporal_note_skinned_draw(const SkinnedDraw& k);
 /// share): its input as it samples it (in, in_view) and its output's storage view (out at level 0). known: one of the
 /// gameplay networks by its key; else a network of that shape (the fixed shares' own), taken only when its input is this
 /// frame's scene and its output the picture, and left to run without a word otherwise. true: the engine wrote the output
-/// (the dispatch is left out); false: the network runs, the reason logged
+/// (the dispatch is left out); false: the network runs, the reason logged. With the Upscaler Off (temporal_off) the same
+/// dispatches get the linear stretch in place of an engine
 bool temporal_upscale(VkCommandBuffer cmd, uint64_t key, bool known, Texture* in, VkImageView in_view, Texture* out,
                       VkImageView out_view, uint32_t out_level);
 
@@ -84,7 +89,8 @@ struct TemporalImage {
     VkFormat format = VK_FORMAT_UNDEFINED;
     uint32_t width = 0, height = 0;
 };
-/// One frame's evaluation. color: the scene as the network samples it (tonemapped, square-root encoded: LDR, RGBA16F);
+/// One frame's evaluation. color: the scene as the network samples it (tonemapped, square-root encoded: LDR, RGBA16F; linear
+/// light past 1 with the game's native HDR for an engine whose hdr() says it takes that, its output then linear as well);
 /// depth: R32F in [0, 1], not reversed; motion: RG16F in render pixels, towards the frame before, the jitter taken off. They
 /// are as large as the engine asked (in_w x in_h), the frame's part at the top left. output: RGBA16F, at the output's size
 /// (DLAA, FSR's native AA: the render size)
@@ -113,6 +119,10 @@ struct TemporalEngine {
     void (*release)();
     /// Its own video memory for the status line, in bytes (0: not known)
     uint64_t (*memory)();
+    /// Whether what prepare made takes HDR colour (past 1: the game's native HDR), which the chain then gives it as linear
+    /// light, unclamped, and takes back linear; null or false: LDR colour, square-root encoded, clamped to 0..1 (an LDR
+    /// engine fed more would misread it)
+    bool (*hdr)() = nullptr;
 };
 /// Runs f a few frames on, to free what work in flight may still use. Called by the engines with the chain's lock held
 void temporal_later(std::function<void()> f);

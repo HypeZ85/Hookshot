@@ -25,17 +25,20 @@
 #include <iterator>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "vk_paths.h"
 #include "vk_menu.h"
 #include "vk_menu_hit.h"
+#include "vk_fps.h"    // (the FPS counter's levels and numbers)
 #include "vk_draw.h"   // (pipeline_cache_save: Restart now keeps what was built)
 #include "oot_cheat_items.h"
 #include "vk_progress.h"   // (StartupView, version_text: the start-up screen)
 #include "vk_ui.h"
 #include "vk_menu_keys.h"   // (which gamepad buttons confirm and go back: those A and B are bound to)         // (how it looks: Dear ImGui, vk_imgui.h)
 #include "vk_dlss.h"
+#include "../../host/hos_wide_size.h"   // (the widescreen picture's size, as host/hos_main.c works it out)
 #include "vk_fsr3.h"      // (the Upscaler row: whether AMD FSR 3.1 runs on this GPU)
 #include "vk_fsr3fi.h"    // (the Frame generation row: whether FSR 3.1 makes the frame)
 #include "vk_fsr4.h"
@@ -45,12 +48,16 @@
 #include "upscaler_rows.h"
 #include "menu_restart.h"
 #include "dlss_nr_controls.h"
+#ifndef HOOKSHOT_ENV_H   // (env_on: the switches' one rule)
+#include "hookshot_env.h"
+#endif
 #include "vk_work.h"   // (after the others: counts the commands that do GPU work, for full_barrier)
 #ifndef HOOKSHOT_VERSION   // (nx2/build.py gives it to this file: nx2/version.py)
 #define HOOKSHOT_VERSION "unknown"
 #endif
 
 namespace mkwvk {
+int display_refresh_mhz();   // (vk_main.cpp: the window's display, asked once a second at most: the FPS counter's V-Sync target)
 HWND app_window();
 
 Options opts;
@@ -140,7 +147,7 @@ void nr_look(const dlss_nr::Look& look) {
     opts.dlss5_color = look.color;
 }
 void nr_publish() {
-    dlss_nr_publish({opts.dlss5 != 0, nr_model(), opts.dlss5_color, opts.dlss5_history, opts.dlss5_debug, opts.dlss5_stats != 0, opts.hdr == 2});
+    dlss_nr_publish({opts.dlss5 != 0, nr_model(), opts.dlss5_color, opts.dlss5_history, opts.dlss5_debug, opts.hdr == 2});
 }
 
 struct Row {
@@ -155,8 +162,8 @@ struct Row {
     // menu keeps the height of the tallest: measure_help)
     const char* (*hint)(int v, int variant) = nullptr;
     bool restart = false;   // (read once, at the start: a change applies after a restart)
-    bool preset_exempt = false;   // (a change here leaves the Quality preset alone: the controls, the window, the counter,
-                                  // frame generation)
+    bool preset_exempt = false;   // (a change here leaves the Quality preset alone: every row apply_preset does not set,
+                                  // tests/test_preset_exempt.py)
     signed char cheat = -1;   // (a debug tool, on the Debug tab with the tools on: its index in the cheat_ tables, -1 none)
     bool heading = false;     // (a section's title on its tab, not a row: the selection steps over it)
     int nr_area = 0;
@@ -175,10 +182,13 @@ const char* tx_framegen(int v) {
     return t[v];
 }
 const char* tx_onoff(int v) { return v ? "On" : "Off"; }
+const char* tx_fps_level(int v) { return fps_stats::level_name(v); }
+const char* tx_fps_corner(int v) { return fps_stats::corner_name(v); }   // (the FPS counter row: Off, FPS, Frame time, Graph, Breakdown)
 const char* tx_profile(int v) { return v ? "Handheld" : "Docked"; }   // (opts.handheld: the Profile row)
 const char* tx_menu_shortcut(int v) {
-    static const char* const names[] = {"Insert or F1", "F1 only"};   // (F1 is never turned off: the menu is always one key away)
-    return names[v ? 1 : 0];
+    // (F1 is never turned off: the menu is always one key away. Esc as well, as a PC game's pause menu)
+    static const char* const names[] = {"Insert or F1", "F1 only", "Insert, F1 or Esc"};
+    return names[std::clamp(v, 0, 2)];
 }
 const char* tx_hdr(int v) { return v == 1 ? "Expanded" : v == 2 ? "Native (the game's)" : "Off"; }
 const char* tx_nits(int v) {
@@ -187,8 +197,8 @@ const char* tx_nits(int v) {
     return b;
 }
 const char* tx_fps_cap(int v) {
-    static const char* const t[] = {"60 (the console's)", "90", "120", "144", "165", "240"};
-    return t[v < 0 ? 0 : v > 5 ? 5 : v];
+    static const char* const t[] = {"60 (the console's)", "90", "120", "144", "165", "240", "Uncapped"};
+    return t[v < 0 ? 0 : v > 6 ? 6 : v];
 }
 // (hookshot) Motion controls: the choice, and whether a connected controller has a gyroscope (host/pad_sdl.c). Either can be
 // chosen whatever is connected: a pad plugged in later is read when it comes
@@ -236,20 +246,21 @@ const char* hn_antilag(int v, int variant) {
     return variant <= 0 ? t[v ? 1 : 0] : nullptr;
 }
 // The Upscaler (opts.dlss): what scales the 3D up to the output. DLSS and DLAA only where dlss_why() lets them run, FSR 3.1
-// only where vk_fsr3.cpp says it does, FSR 4 and its native AA only where fsr4_why() does; the menu shows (and steps from)
-// what runs, and keeps the saved choice for a PC where it can
+// only where vk_fsr3.cpp says it does, FSR 4 and its native AA only where fsr4_why() does, Off (no upscaler: vk_temporal.cpp
+// temporal_off) everywhere; the menu shows (and steps from) what runs, and keeps the saved choice for a PC where it can
 namespace ur = upscaler_rows;
 /// One bit per upscaler that runs here (upscaler_rows.h bit). Each backend caches its own answer, so this costs nothing
 unsigned upscalers_available() {
-    return ur::bit(ur::GAME) | ur::dlss_bits(dlss_why() == DLSS_OK) | (fsr3::supported() ? ur::bit(ur::FSR3) : 0u) |
-           ur::fsr4_bits(fsr4_why() == FSR_OK);
+    return ur::bit(ur::GAME) | ur::bit(ur::OFF) | ur::dlss_bits(dlss_why() == DLSS_OK) |
+           (fsr3::supported() ? ur::bit(ur::FSR3) : 0u) | ur::fsr4_bits(fsr4_why() == FSR_OK);
 }
-/// (FSR 3.1 has inputs of its own; DLSS and FSR 4 run on the frame chain they share, temporal_mode)
-int upscaler() { return fsr3_wanted() ? (int)ur::FSR3 : temporal_mode(); }
+/// (FSR 3.1 has inputs of its own; DLSS and FSR 4 run on the frame chain they share, temporal_mode; Off is neither)
+int upscaler() { return fsr3_wanted() ? (int)ur::FSR3 : temporal_off() ? (int)ur::OFF : temporal_mode(); }
 const char* tx_upscaler(int) {
     static const char* t[ur::kUpscalers] = {"Game's own", "NVIDIA DLSS", "NVIDIA DLAA", "AMD FSR 3.1", "AMD FSR 4",
-                                            "AMD FSR 4 Native AA"};
-    return t[std::clamp(upscaler(), 0, ur::kUpscalers - 1)];
+                                            "AMD FSR 4 Native AA", "Off (no upscaling)"};
+    // (by engine: DLAA and FSR 4's native AA are the Render resolution row's Native, upscaler_rows.h engine)
+    return t[std::clamp(ur::engine(upscaler()), 0, ur::kUpscalers - 1)];
 }
 /// The Upscaler: the one shown (what runs, upscaler()), and with the game's own, why DLSS and FSR are not offered. Variants
 /// (every one): each value, then the game's own with each of DLSS's reasons, then with each of FSR's
@@ -265,6 +276,8 @@ const char* hn_upscaler(int v, int variant) {
         "AMD's machine-learned upscaler, from a smaller 3D, with AMD's files beside the game. Things that move by themselves "
         "can trail for now.",
         "AMD's machine-learned upscaler, the 3D at full size with its edges smoothed; the slowest.",
+        "No upscaler, not even the game's network: the 3D is stretched to the output with a plain linear filter. The "
+        "fastest choice and the roughest picture: no edge smoothing, and softer below 100%.",
     };
     static const char* const dlss_no[DLSS_WHY_COUNT] = {
         nullptr,
@@ -329,7 +342,7 @@ const char* hn_dlss_model(int v, int variant) {
     };
     static const char* const unused = "Used by NVIDIA DLSS and DLAA: choose one in the Upscaler row.";
     static const char* const env = "Set for this run by RX_VK_DLSS_PRESET.";
-    if (variant < 0) variant = dlss_preset_env() ? 2 : upscaler() == ur::GAME ? 1 : 0;
+    if (variant < 0) variant = dlss_preset_env() ? 2 : upscaler() == ur::GAME || upscaler() == ur::OFF ? 1 : 0;
     if (variant == 1) return unused;
     if (variant == 2) return env;
     return variant == 0 ? t[std::clamp(v, 0, ur::kModels - 1)] : nullptr;
@@ -338,6 +351,15 @@ const char* tx_percent(int v) {
     static char b[8];
     snprintf(b, sizeof b, "%d%%", v);
     return b;
+}
+/// The main screen's size, as host/hos_main.c takes its shape at the start (the Ultrawide row): false where it
+/// is not known (Linux: the sizes are shown as the 16:9 outputs)
+bool screen_size(uint32_t* w, uint32_t* h) {
+#ifdef _WIN32
+    const int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
+    if (sw > 0 && sh > 0) return *w = (uint32_t)sw, *h = (uint32_t)sh, true;
+#endif
+    return false;
 }
 // The output the menu's sizes are shown for: the Output resolution row's (applied at the next start), so the rows below follow a change
 // at once; the Handheld profile runs the game's own (1536x864)
@@ -356,13 +378,13 @@ Out output_at(int v) {
     return v == kCustomOutput ? custom_output : kOutputs[v];
 }
 /// output_res= (or HOS_OUTPUT_RES) to a choice: "<width>x<height>" (each side a multiple of 8, rounded down; at least 640 x 360,
-/// at most 5120 x 2880's pixels, 5:4 to 32:9), one of the sizes offered or the player's own (custom_output); the numbers saved
+/// at most 5120 x 2880's pixels, 5:4 to 48:9), one of the sizes offered or the player's own (custom_output); the numbers saved
 /// before (0 to 5) as theirs; anything else the game's own (host/nn_applet.c hos_output_parse: the same rules)
 int parse_output(const char* text) {
     unsigned w = 0, h = 0;
     if (text && sscanf(text, "%u%*[xX]%u", &w, &h) == 2) {
         w &= ~7u, h &= ~7u;
-        if (w < 640 || h < 360 || (uint64_t)w * h > 5120ULL * 2880 || (uint64_t)w * 4 < (uint64_t)h * 5 || (uint64_t)w * 9 > (uint64_t)h * 32)
+        if (!hos_output_size_valid(w, h))
             return 0;
         for (int i = 0; i < kCustomOutput; i++)
             if (kOutputs[i].w == w && kOutputs[i].h == h) return i;
@@ -385,8 +407,31 @@ int step_output_choice(int id, int dir) {
     const int at = (int)(std::find(order, order + n, output_choice(id)) - order);
     return order[std::clamp(at + dir, 0, n - 1)];
 }
+/// The picture an Output resolution choice makes: a custom surround output takes its own shape;
+/// otherwise Ultrawide uses the screen's shape. Both keep at most hos_wide_max_px() pixels, matching
+/// host/hos_main.c at startup (host/hos_wide_size.h); otherwise the
+/// 16:9 output. The game's own choice (0) as it is (its size comes from the game's graphics scale). *native: the screen's own size
+Out picture_for(int v, bool* native = nullptr) {
+    v = output_choice(v);
+    Out o = output_at(v);
+    uint32_t sw = 0, sh = 0;
+    if (native) *native = false;
+    const bool surround = hos_output_is_surround(o.w, o.h);
+    if (v && !opts.handheld && (surround || opts.ultrawide)) {
+        const bool have_screen = screen_size(&sw, &sh);
+        const double want = surround ? (double)o.w / o.h : have_screen ? (double)sw / sh : 0.0;
+        const double game = 16.0 / 9.0;
+        if (want > game * 1.01 || (want > 1.0 && want < game * 0.99)) {
+            unsigned w = 0, h = 0;
+            hos_wide_size(o.h, hos_wide_clamp(want), hos_wide_max_px(), &w, &h);
+            o = Out{w, h};
+        }
+        if (native) *native = o.w == sw && o.h == sh;
+    }
+    return o;
+}
 Out shown_output() {
-    return opts.handheld ? Out{1536, 864} : output_at(opts.output_res);
+    return opts.handheld ? Out{1536, 864} : picture_for(opts.output_res);   // (the real picture)
 }
 // The size the game draws the 3D at for a fixed scale of its output, a twelfth of it: every twelfth asked came out exact at the three
 // outputs (2048x1152: 0.58 drew 1195x672, 0.6667 1366x768). So the scale the game is given is the twelfth too: 0.67 drew 2615x1471 at
@@ -398,17 +443,22 @@ void game_size(float scale, uint32_t& w, uint32_t& h) {
     w = (o.w * k + 11) / 12, h = o.h * k / 12;
 }
 const char* tx_resolution(int v) {
-    static char b[48];
+    static char b[64];
     const int up = upscaler();
-    if (up == ur::DLAA) return "Native (DLAA)";
-    if (up == ur::FSR4_AA) return "Native (FSR 4)";
-    if (!ur::percent(v)) return "Auto (dynamic)";
-    if (const char* mode = ur::scales_by_mode(up) ? ur::dlss_mode_name(v) : nullptr) {
-        snprintf(b, sizeof b, "%s (%d%%)", mode, ur::percent(v));
+    // (each stop with the 3D's real size, the render input: a twelfth of the picture (game_size), Native
+    // the picture itself)
+    if (up == ur::DLAA || up == ur::FSR4_AA) {
+        const Out o = shown_output();
+        snprintf(b, sizeof b, "Native (%s, %ux%u)", up == ur::DLAA ? "DLAA" : "FSR 4", o.w, o.h);
         return b;
     }
+    if (!ur::percent(v)) return "Auto (dynamic)";
     uint32_t w, h;
     game_size(ur::percent(v) / 100.0f, w, h);
+    if (const char* mode = ur::scales_by_mode(up) ? ur::dlss_mode_name(v) : nullptr) {
+        snprintf(b, sizeof b, "%s %d%% (%ux%u)", mode, ur::percent(v), w, h);
+        return b;
+    }
     snprintf(b, sizeof b, "%d%% (%ux%u)", ur::percent(v), w, h);
     return b;
 }
@@ -416,19 +466,18 @@ const char* tx_resolution(int v) {
 const char* hn_resolution(int v, int variant) {
     const int up = variant < 0 ? std::clamp(upscaler(), 0, ur::kUpscalers - 1) : variant;
     if (up >= ur::kUpscalers) return nullptr;
-    if (up == ur::DLAA)
-        return "DLAA draws the 3D at full size: nothing to set here. Choose DLSS or the game's own upscaler to draw it "
-               "smaller.";
-    if (up == ur::FSR4_AA)
-        return "FSR 4's native AA draws the 3D at full size: nothing to set here. Choose FSR 4 or the game's own upscaler "
-               "to draw it smaller.";
+    // (Native is the slider's top: the 3D at the picture's full size)
+    if (up == ur::DLAA) return "DLAA: the 3D at the picture's full size, anti-aliased by DLSS. The sharpest, and the heaviest.";
+    if (up == ur::FSR4_AA) return "FSR 4's native AA: the 3D at the picture's full size. The sharpest, and the heaviest.";
     const int p = ur::percent(v);
     if (up == ur::DLSS) {
         switch (p) {
         case 0: return "The game lowers it when the GPU is busy, and DLSS follows. Set Sharpness to around 80%.";
-        case 67: return "DLSS's sharpest mode. Set Sharpness to around 80%.";
+        case 92: case 83: case 75: return "Between Native and Quality: sharper than Quality, a little slower.";
+        case 67: return "DLSS's Quality mode: its sharpest from a smaller 3D. Set Sharpness to around 80%.";
         case 58: return "Between Quality and Performance. Set Sharpness to around 80%.";
         case 50: return "Faster, and softer. Set Sharpness to around 80%.";
+        case 42: return "Between Performance and Ultra Performance.";
         case 33: return "DLSS's fastest mode, and its softest. Set Sharpness to around 80%.";
         default: return nullptr;   // (not one of DLSS's steps: the row moves to one)
         }
@@ -436,12 +485,19 @@ const char* hn_resolution(int v, int variant) {
     if (up == ur::FSR3 || up == ur::FSR4) {   // (the same modes, AMD's ratios)
         switch (p) {
         case 0: return "The game lowers it when the GPU is busy, and FSR follows.";
-        case 67: return "FSR's Quality mode, 1.5x: its sharpest.";
+        case 100: return "FSR 3.1's native AA: the 3D at the picture's full size, anti-aliased by FSR. The sharpest, and the heaviest.";
+        case 92: case 83: case 75: return "Between native AA and Quality: sharper than Quality, a little slower.";
+        case 67: return "FSR's Quality mode, 1.5x: the sharpest of AMD's upscaling modes.";
         case 58: return "FSR's Balanced mode, 1.7x.";
         case 50: return "FSR's Performance mode, 2x: faster, and softer.";
         case 33: return "FSR's Ultra Performance mode, 3x: its fastest, and its softest.";
         default: return nullptr;   // (not one of FSR's steps: the row moves to one)
         }
+    }
+    if (up == ur::OFF) {   // (no upscaler: the 3D stretched to the output as it is drawn)
+        if (!p) return "The game lowers it when the GPU is busy; the 3D is stretched from whatever size it draws.";
+        if (p == 100) return "The 3D at the output's full size, not stretched: the sharpest, but its edges stay jagged.";
+        return "A steady size, stretched to the output: lower is faster, and blurrier.";
     }
     if (!p) return "The game lowers it when the GPU is busy.";
     if (p == 100) return "The 3D at the output's full size: the sharpest, and the slowest.";
@@ -450,17 +506,21 @@ const char* hn_resolution(int v, int variant) {
 /// A row with nothing else to choose here: shown without its arrows, Left and Right leave it (and the saved value) alone
 bool row_fixed(const int* value) {
     return            (value == &opts.dlss5 && !opts.dlss5 && dlss_nr::blocking(dlss_nr_issue())) ||
-           (value == &opts.dlss5_debug && !(temporal_mode() == 1 || temporal_mode() == 2)) ||
+           (value == &opts.dlss5_debug && (opts.hdr == 2 || !(temporal_mode() == 1 || temporal_mode() == 2))) ||
            ((nr_control(value) || value == &opts.dlss5_color || value == &opts.dlss5_history || value == &opts.dlss5_profile) && dlss_nr::blocking(dlss_nr_issue())) ||
            (value == &opts.dlss && ur::upscaler_fixed(upscalers_available())) ||
-           (value == &opts.resolution && ur::resolution_fixed(upscaler())) || (value == &opts.upscale && !filter_needed()) ||
-           (value == &opts.dlss_model && ur::model_fixed(upscaler(), dlss_preset_env() != nullptr));
+           (value == &opts.resolution && ur::render_fixed(upscaler())) || (value == &opts.upscale && !filter_needed()) ||
+           (value == &opts.dlss_model && ur::model_fixed(upscaler(), dlss_preset_env() != nullptr)) ||
+           (value == &opts.astc_rgba8 && getenv("RX_VK_ASTC_RGBA8"));   // (set for the run: vk_texture.cpp reads it first)
 }
 const char* tx_output_res(int v) {
-    static char b[32];
+    static char b[40];
     v = output_choice(v);
-    const Out o = output_at(v);
-    snprintf(b, sizeof b, "%ux%u%s", o.w, o.h, v ? "" : " (game's)");
+    // (the picture this choice makes (picture_for: at the monitor's shape with Ultrawide on), "(native)"
+    // when it is the screen's own size; the game's own choice (0) keeps its name)
+    bool native = false;
+    const Out o = picture_for(v, &native);
+    snprintf(b, sizeof b, "%ux%u%s", o.w, o.h, native ? " (native)" : v ? "" : " (game's)");
     return b;
 }
 /// Anisotropic filtering: the game's own, or 2x to 16x (vk_draw.cpp aniso_override)
@@ -479,7 +539,7 @@ const char* tx_text_size(int v) {
     if ((unsigned)v >= sizeof t / sizeof t[0]) return t[0];
     return t[v];
 }
-const char* tx_ultrawide(int v) { return v ? "Monitor's shape" : "16:9"; }
+const char* tx_ultrawide(int v) { return v ? "Monitor's shape" : "Off (16:9)"; }
 const char* tx_prompts(int v) {
     static const char* t[HOS_PROMPT_N + 1] = {"Auto", "Switch", "Xbox", "PlayStation 4", "PlayStation 5", "Steam Deck"};
     return t[std::min(std::max(v, 0), (int)HOS_PROMPT_N)];
@@ -554,19 +614,15 @@ const char* hn_mic(int v, int variant) {
     return missing ? "Not plugged in: Default stands in until it is back." : "This microphone, by its name. A change applies at once.";
 }
 const char* tx_rumble(int v) { return v ? tx_percent(v) : "Off"; }
-// (hookshot) Menu size: how large the overlays are drawn (vk_ui.h unit); Auto is Large in fullscreen at 1080 lines and up while
-// a controller is the menu's input, else Medium
+// (hookshot) Menu size: how large the overlays are drawn (vk_ui.h unit), Medium unless the player chooses Small or Large. It
+// was Auto by default, Large in fullscreen at 1080 lines and up while a controller opened the menu: the menu changed size with
+// the input that opened it, and the version in its banner no longer fitted. An options file's menu_size=0 (that Auto): Medium
+constexpr float kVersionMinPt = 10;   // (the banner's version at Small and Medium: shrunk to fit, no smaller than this, in points)
 bool pad_last = false;   // (a controller was the menu's last input: its buttons in the prompts)
-// (Auto's choice: the controller or not, decided as the menu opens by the input that opened it. A controller's input makes it
-// Large at any time; the keys and the mouse never make it smaller while the menu is open, so it never changes size under the
-// cursor)
-bool auto_pad = false;
 int pad_confirm = 0, pad_back = 1;   // (the face buttons that confirm and go back, HOS_PAD_*: menu_keys::confirm_back, each tick)
-bool auto_large(uint32_t h) { return opts.fullscreen && h >= 1080 && auto_pad; }
 const char* tx_menu_size(int v) {
-    static const char* t[] = {"Auto", "Small", "Medium", "Large"};
-    if (v == 0) return auto_large(dev.swap_extent.height) ? "Auto (Large)" : "Auto (Medium)";
-    return (unsigned)v < 4 ? t[v] : t[0];
+    static const char* t[] = {"Small", "Medium", "Large"};
+    return v >= 1 && v <= 3 ? t[v - 1] : t[1];
 }
 const char* tx_stick_dead_zone(int v) {
     static const char* t[] = {"Default (24%)", "5%", "10%", "15%", "20%", "30%"};
@@ -586,24 +642,51 @@ const char* tx_robust(int v) {
     static const char* t[] = {"Auto", "Off", "On"};
     return (unsigned)v < 3 ? t[v] : t[0];
 }
+const char* tx_mesh_mode(int v) {
+    static const char* t[] = {"Automatic", "Native", "Compute"};
+    return (unsigned)v < 3 ? t[v] : t[0];
+}
 const char* tx_preset(int v) {
     static const char* t[] = {"Custom", "Minimum (4GB)", "Low (6GB)", "Balanced (8GB)", "High (12GB)", "Ultra (16GB+)"};
     return t[std::min(std::max(v, 0), 5)];
 }
+// (hookshot) The VRAM budget row's choices: the texture and mirror budgets in MB (0: Auto, the renderer's own rule). The presets'
+// budgets are among them (preset_vram_budget), so a preset sets the row, and the row can also be chosen on its own (null and
+// Gummi, #dev-work 2026-11-10: the presets were the only way to set a limit)
+constexpr int kVramBudgets = 8;
+constexpr int kVramMinimumOnly = 1;   // (2.2 GB: set by the Minimum (4GB) preset only; the row's own steps go past it)
+constexpr int kVramTextureMb[kVramBudgets] = {0, 2200, 3600, 4800, 6144, 7500, 9216, 11000};
+constexpr int kVramMirrorMb[kVramBudgets] = {0, 256, 512, 1024, 1536, 2048, 2560, 3072};
+int preset_vram_budget(int p) {
+    static const int of[] = {0, 1, 2, 3, 5, 7};   // (none: Auto; Minimum 2.2 GB, Low 3.6, Balanced 4.8, High 7.5, Ultra 11)
+    return of[std::min(std::max(p, 0), 5)];
+}
+void vram_budget_sync() {
+    const int b = std::min(std::max(opts.vram_budget, 0), kVramBudgets - 1);
+    opts.vram_mb = kVramTextureMb[b];
+    opts.mirror_mb = kVramMirrorMb[b];
+}
+const char* tx_vram_budget(int v) {
+    static const char* t[kVramBudgets] = {"Auto", "2.2 GB (4GB preset)", "3.6 GB", "4.8 GB", "6 GB", "7.5 GB", "9 GB", "11 GB"};
+    return t[std::min(std::max(v, 0), kVramBudgets - 1)];
+}
+MENU_HINTS(hn_vram_budget, 0, "Set from what the driver allows: 70% of it, 45% on cards of 8 GB or less, at most 6 GB.",
+           "For 4 GB cards.", "For 6 GB cards.", "For 8 GB cards.", "The most Auto ever sets.", "For 12 GB cards.", nullptr,
+           "For 16 GB cards.")
+/// a preset's budgets (0: none, Auto): the VRAM budget row set to them
 void sync_preset_budgets(int p) {
-    switch (p) {
-    case 1: opts.vram_mb = 2200;  opts.mirror_mb = 256;  break;
-    case 2: opts.vram_mb = 3600;  opts.mirror_mb = 512;  break;
-    case 3: opts.vram_mb = 4800;  opts.mirror_mb = 1024; break;
-    case 4: opts.vram_mb = 7500;  opts.mirror_mb = 2048; break;
-    case 5: opts.vram_mb = 11000; opts.mirror_mb = 3072; break;
-    default: opts.vram_mb = 0;    opts.mirror_mb = 0;    break;
-    }
+    opts.vram_budget = preset_vram_budget(p);
+    vram_budget_sync();
 }
 // (Sharpness: tuned for the window pass's neighbours one picture pixel apart, each about the old setting's sharpening on a
 // 3840 x 2160 window at that preset's picture, 2048 x 1152 or the handheld profile's 1536 x 864: same frame, mean |Laplacian|
 // of the window and of the picture, on the slider's steps)
+void env_release(const int* value);   // (below: a row the environment held, set by the menu from now on)
 void apply_preset(int p) {
+    // (the rows it sets are the preset's from now on, even at the value the environment forced: save writes them)
+    if (p > 0)
+        for (const int* v : {&opts.resolution, &opts.upscale, &opts.sharpness, &opts.pace, &opts.realtime, &opts.handheld})
+            env_release(v);
     switch (p) {
     case 1: // Minimum (4GB VRAM / iGPU)
         opts.resolution = 4; opts.upscale = 2; opts.sharpness = 30;
@@ -630,11 +713,12 @@ void apply_preset(int p) {
     }
     // (the Upscaler and Frame generation are the player's: a preset never turns DLSS or made frames on or off. With DLSS
     // its resolution is DLSS's nearest mode)
-    if (p > 0) opts.resolution = ur::snap(upscaler(), opts.resolution);
+    if (p > 0) opts.resolution = ur::snap_render(upscaler(), opts.resolution);   // (a slider stop kept)
+    opts.budget = p;   // (Custom chosen on this row: no budget, as before)
     sync_preset_budgets(p);
 }
 
-MENU_HINTS(hn_preset, 0, "Each row as you set it. Changing most rows yourself comes back to Custom.",
+MENU_HINTS(hn_preset, 0, "Each row as you set it. Changing most rows yourself comes back to Custom; the VRAM budget row keeps its value.",
            "Resolution 50% (with DLSS its nearest mode), Lanczos, Sharpness 30%, the Handheld Profile.",
            "Resolution 75% (with DLSS its nearest mode), Lanczos, Sharpness 30%, the Handheld Profile.",
            "Resolution 100% (with DLSS its nearest mode), Catmull-Rom, Sharpness 30%.",
@@ -655,6 +739,33 @@ const char* hn_framegen(int v, int variant) {
     return b[std::clamp(v, 2, 8)];
 }
 MENU_HINTS(hn_pace, 0, "As soon as it is ready.", "At an even interval: less stutter, at up to one frame of delay.")
+const char* tx_framegen_by(int v) { return v ? "Built-in" : "Auto"; }
+MENU_HINTS(hn_framegen_by, 0,
+           "NVIDIA DLSS Frame Generation where it runs (RTX 40 and newer, with the Upscaler's depth and motion), else the "
+           "built-in one.",
+           "The renderer's own: made from the finished picture alone.")
+const char* tx_vsync(int v) {
+    static const char* const t[] = {"Auto", "On", "Off"};
+    return t[std::clamp(v, 0, 2)];
+}
+/// (the environment's switch for this run, over the row: menu_vsync)
+const char* vsync_env() {
+    if (env_on("RX_VK_FIFO")) return "RX_VK_FIFO";
+    if (env_on("RX_VK_IMMEDIATE")) return "RX_VK_IMMEDIATE";
+    return nullptr;
+}
+const char* hn_vsync(int v, int variant) {
+    static const char* const t[] = {
+        "No tearing and no wait where the driver allows it (mailbox); otherwise as On, or on Windows as Off.",
+        "Each frame waits for the display's refresh: no tearing, at most the display's rate.",
+        "Each frame is shown at once: the least delay, and it can tear. Where the driver cannot, as Auto."};
+    if (variant == 1 || (variant < 0 && vsync_env())) {
+        static char b[96];
+        snprintf(b, sizeof b, "%s is set: it chooses for this run.", vsync_env() ? vsync_env() : "RX_VK_FIFO or RX_VK_IMMEDIATE");
+        return b;
+    }
+    return variant <= 0 ? t[std::clamp(v, 0, 2)] : nullptr;
+}
 MENU_HINTS(hn_output_res, 0, "The game's own size.",
            "The sharpest on a 2560x1440 screen: nothing to scale to the window.",
            "The sharpest on a 3840x2160 screen. The game's render targets get a bigger GPU pool, so a full-size 3D fits.",
@@ -687,10 +798,21 @@ const char* tx_wide_menus(int v) {
 MENU_HINTS(hn_wide_menus, 0, "The menus stretched over the whole screen, as before.",
            "The menus in the middle 16:9; beside them, what the game draws there, out of focus.",
            "The menus in the middle 16:9; black beside them.")
+/// (the ASTC as RGBA8 row's line while RX_VK_ASTC_RGBA8 holds it: the old readme's way, still in some hookshot_env.txt files)
+const char* hn_astc_rgba8(int, int variant) {
+    return variant <= 0 && getenv("RX_VK_ASTC_RGBA8") ? "Set by RX_VK_ASTC_RGBA8 (hookshot_env.txt or the environment): remove that line to choose here."
+                                       : nullptr;
+}
 MENU_HINTS(hn_robust, 0, "On, on every card.", "Can be faster on some NVIDIA cards.", "Always on.")
-MENU_HINTS(hn_fps, 0, nullptr, "With frame generation on, the game's own rate too.")
-MENU_HINTS(hn_menu_size, 0, "Large in fullscreen on a screen of 1080 lines or more while a controller is in use, else Medium.",
-           "Smaller, for a desk.", "The usual size.", "Larger, for a TV across the room.")
+MENU_HINTS(hn_mesh_mode, 0, "The GPU's own mesh shaders where it has them, the compute path where it has not.",
+           "The GPU's own mesh shaders for every draw. A GPU without them still uses the compute path.",
+           "The compute path on every GPU: try it if your card crashes or leaves objects out. Usually a little slower.")
+MENU_HINTS(hn_fps, 0, nullptr, "The frame rate. With frame generation on, the game's own rate too.",
+           "And the game's frame time, with its 1% low: the rate of its slowest 1% of frames over the last 10 seconds.",
+           "And a graph of the last 4 seconds' frame times, with a line at the Game frame rate cap's.",
+           "And where each frame's time goes: the game, the renderer, waiting for the GPU, waiting for its turn (frame pacing, "
+           "vsync); the GPU's own time; red marks where shaders were built or draws left out.")
+MENU_HINTS(hn_menu_size, 1, "Smaller, for a desk.", "The usual size.", "Larger, for a TV across the room.")
 MENU_HINTS(hn_speed, 0, "A step each frame: the game slows down whenever it runs below 60 fps.",
            "Normal speed down to 15 fps, by taking longer steps.")
 MENU_HINTS(hn_text_speed, 0, "The game's own pace, with its pauses.", "Twice as fast.", "Four times as fast.",
@@ -723,10 +845,8 @@ Row rows[] = {
      "Fills the whole screen with the game, without the window's border. The same as F11.", nullptr, false, true},
     {TAB_GRAPHICS, "GPU device", &opts.gpu_device, 0, 8, 1, tx_gpu,
      "Which graphics card the game runs on. Applies after a restart.", hn_gpu, true, true},
-    {TAB_GRAPHICS, "Frame generation", &opts.framegen, 0, 8, 1, tx_framegen,
-     "Makes frames between the game's own, for smoother motion, at a little input delay. Fast motion or camera cuts can "
-     "show artifacts.", hn_framegen, false, true},
-    {TAB_GRAPHICS, "Frame pacing", &opts.pace, 0, 1, 1, tx_onoff, "When each frame is shown.", hn_pace},
+    {TAB_GRAPHICS, "V-Sync", &opts.vsync, 0, 2, 1, tx_vsync,
+     "Whether a frame waits for the display's refresh before it is shown. Changes at once.", hn_vsync, false, true},
     {TAB_GRAPHICS, "HDR", &opts.hdr, 0, 2, 1, tx_hdr,
      "HDR10 out on an HDR display (Windows: Use HDR on in the display settings). Expanded: the game's SDR picture, its white at "
      "the paper white and its highlights up to the peak. Native: the game's own HDR, told the display's peak and paper white.",
@@ -735,43 +855,62 @@ Row rows[] = {
      "How bright the picture's white is with HDR on. Around 200 for a normal room; higher in a bright one.", nullptr, false, true},
     {TAB_GRAPHICS, "HDR peak brightness", &opts.hdr_peak, 400, 4000, 100, tx_nits,
      "The brightest highlights with HDR on: set it to your display's peak brightness.", nullptr, false, true},
-    {TAB_GRAPHICS, "Game frame rate cap", &opts.fps_cap, 0, 5, 1, tx_fps_cap,
+    {TAB_GRAPHICS, "HDR contrast", &opts.hdr_contrast, 50, 200, 5, tx_percent,
+     "The HDR picture's contrast around mid grey, as the RenoDX HDR mods grade it: above 100% deeper shadows and brighter "
+     "highlights, which ease into the peak brightness; below it flatter. With Native the game's own HDR picture is graded too, "
+     "under the peak brightness the game is told.",
+     nullptr, false, true},
+    {TAB_GRAPHICS, "Game frame rate cap", &opts.fps_cap, 0, 6, 1, tx_fps_cap,
      "Limits frames rendered by the game. Generated frames are additional. Takes a restart. "
      "Past 60 is experimental: the game keeps real time, but some cutscenes and bosses can misbehave (Gohma, the intro's "
-     "narration). 60 is the safe choice.",
+     "narration). 60 is the safe choice. Uncapped: as fast as the PC can, still at real time; with V-Sync on, the display's "
+     "refresh rate is the limit.",
      nullptr, true, true},
     {TAB_GRAPHICS, "NVIDIA Reflex", &opts.reflex, 0, 2, 1, tx_reflex,
-     "NVIDIA GPUs: each frame starts as late as it can, for less input delay. Not used with frame generation.", hn_reflex},
+     "NVIDIA GPUs: each frame starts as late as it can, for less input delay. With frame generation too: it paces the "
+     "game's frames.", hn_reflex, false, true},
     {TAB_GRAPHICS, "AMD Anti-Lag 2", &opts.antilag, 0, 1, 1, tx_antilag,
-     "AMD GPUs: each frame starts as late as it can, for less input delay. Not used with frame generation.", hn_antilag},
+     "AMD GPUs: each frame starts as late as it can, for less input delay. Not used with frame generation.", hn_antilag, false, true},
     // (the picture's way, top to bottom: the output's size, what fills it from the 3D, the 3D's size, then the window)
     {TAB_GRAPHICS, "Output resolution", &opts.output_res, 0, kLastOutput, 1, tx_output_res,
      "The game's whole frame, HUD included, before it is scaled to the window. Docked only. Applies after a restart.",
-     hn_output_res, true},
+     hn_output_res, true, true},
     {TAB_GRAPHICS, "Upscaler", &opts.dlss, 0, ur::kUpscalers - 1, 1, tx_upscaler, "What scales the 3D up to the Output resolution.",
      hn_upscaler},
     {TAB_GRAPHICS, "DLSS 5", nullptr, 0, 0, 0, nullptr, "Experimental Neural Rendering controls and comparison. Requires DLSS or DLAA and a compatible user-supplied NR runtime."},
     {TAB_GRAPHICS, "DLSS model", &opts.dlss_model, 0, ur::kModels - 1, 1, tx_dlss_model,
      "Which of NVIDIA's DLSS networks draws the picture.", hn_dlss_model, false, true},
+    {TAB_GRAPHICS, "VRAM budget", &opts.vram_budget, 0, kVramBudgets - 1, 1, tx_vram_budget,
+     "How much video memory the game's textures may use, and its copies of game memory with them. Lower it if the game "
+     "stutters after a while of play; a preset sets it.", hn_vram_budget, false, true},
     {TAB_GRAPHICS, "Render resolution", &opts.resolution, 0, ur::kValues - 1, 1, tx_resolution,
      "The share of the output the 3D is drawn at; the Upscaler fills in the rest.", hn_resolution},
+    // (frame generation beside the Upscaler: the frames it makes come from the same picture, and DLSS Frame Generation from
+    // the Upscaler's own depth and motion)
+    {TAB_GRAPHICS, "Frame generation", &opts.framegen, 0, 8, 1, tx_framegen,
+     "Makes frames between the game's own, for smoother motion, at a little input delay. Fast motion or camera cuts can "
+     "show artifacts.", hn_framegen, false, true},
+    {TAB_GRAPHICS, "Frame generation by", &opts.framegen_by, 0, 1, 1, tx_framegen_by,
+     "Who makes the frames at 2x and up. NVIDIA DLSS Frame Generation needs a temporal Upscaler (DLSS, DLAA or FSR) for "
+     "the scene's depth and motion. Changes at once.", hn_framegen_by, false, true},
+    {TAB_GRAPHICS, "Frame pacing", &opts.pace, 0, 1, 1, tx_onoff, "When each frame is shown.", hn_pace},
     {TAB_GRAPHICS, "Window scaling filter", &opts.upscale, 0, 2, 1, tx_filter,
      "How the finished picture is scaled to the window, when its size differs from the Output resolution.", hn_filter},
     {TAB_GRAPHICS, "Sharpness", &opts.sharpness, 0, 100, 10, tx_percent,
      "Sharpens the picture as it goes to the window, with any filter. Too much shows halos around edges.", hn_sharpness},
     {TAB_GRAPHICS, "Anisotropic filtering", &opts.anisotropy, 0, 4, 1, tx_anisotropy,
      "Keeps textures sharp on surfaces seen at a slant, such as the ground ahead: higher is sharper in the distance, for a "
-     "little GPU time. Game's is the console's own (1x or 2x).", nullptr},
+     "little GPU time. Game's is the console's own (1x or 2x).", nullptr, false, true},
     {TAB_GRAPHICS, "Profile", &opts.handheld, 0, 1, 1, tx_profile,
      "Runs the game as the console docked or handheld. Applies after a restart.", hn_handheld, true},
     {TAB_GRAPHICS, "Ultrawide", &opts.ultrawide, 0, 1, 1, tx_ultrawide,
-     "The camera's shape on a screen wider or narrower than 16:9 (4:3, 16:10). Applies after a restart.", hn_ultrawide, true},
+     "The camera's shape on a screen wider or narrower than 16:9 (4:3, 16:10). Applies after a restart.", hn_ultrawide, true, true},
     {TAB_GRAPHICS, "Ultrawide menus", &opts.wide_menus, 0, 2, 1, tx_wide_menus,
      "With Ultrawide: the pause, item and map menus, and what shows beside them. Loading screens and pre-rendered movies, "
-     "which draw no world either, get the same sides. Changes at once.", hn_wide_menus},
-    {TAB_GRAPHICS, "Robust buffers", &opts.robust, 0, 2, 1, tx_robust,
-     "Bounds-checked buffer reads: a read past a buffer's end is dropped instead of stopping the GPU. Applies after a "
-     "restart.", hn_robust, true},
+     "which draw no world either, get the same sides. Changes at once.", hn_wide_menus, false, true},
+    {TAB_GRAPHICS, "Mesh shaders", &opts.mesh_mode, 0, 2, 1, tx_mesh_mode,
+     "How the game's mesh programs (much of the scenery) run: on the GPU's own mesh shaders, or as compute shaders, which "
+     "every GPU has. Applies after a restart.", hn_mesh_mode, true, true},
 
     // The same persistent state on both pages; grouping keeps the list short.
     {TAB_DLSS5, "Controls", &opts.dlss5_advanced, 0, 1, 1, tx_nr_page, "Base: everyday controls. Advanced: General and Quality.", nullptr, false, true, -1, false, 0},
@@ -796,7 +935,6 @@ Row rows[] = {
     {TAB_DLSS5, "Auto skin mask", &opts.dlss5_mask, 0, 1, 1, tx_onoff, "Native automatic skin detection. Its internal mask is not exposed as a readable renderer buffer.", nullptr, false, true, -1, false, 3},
     {TAB_DLSS5, "UI correction", &opts.dlss5_ui, 0, 1, 1, tx_onoff, "Native flag. Hookshot's HUD and menus are drawn after NR and already bypass it.", nullptr, false, true, -1, false, 3},
     {TAB_DLSS5, "Debug view", &opts.dlss5_debug, 0, 5, 1, tx_nr_debug, "Session only; starts in Normal. Actual buffers. Difference: luma-weighted absolute linear RGB delta x20. Depth: device depth. Motion: R=X, G=Y, gray=zero, +/-16 pixels.", nullptr, false, true, -1, false, 3},
-    {TAB_DLSS5, "Statistics", &opts.dlss5_stats, 0, 1, 1, tx_onoff, "Extends the top-right FPS counter with frametime, NR resolution and nonblocking GPU timestamps for NGX evaluation only. Hidden while full settings are open.", nullptr, false, true, -1, false, 3},
 #if defined(__linux__) && !defined(_WIN32)
     {TAB_DLSS5, "Retry detection", nullptr, 0, 0, 0, nullptr, "Recheck native NGX capability. A changed driver/runtime or the Linux opt-in environment setting requires a restart.", nullptr, false, true, -1, false, 0},
 #else
@@ -813,16 +951,18 @@ Row rows[] = {
      "The speakers the game mixes its sound for. Applies after a restart.", hn_audio_output, true, true},
 
     // Gameplay
-    {TAB_GAMEPLAY, "FPS counter", &opts.show_fps, 0, 1, 1, tx_onoff, "Frames per second in the top right corner.", hn_fps,
-     false, true},
-    {TAB_GAMEPLAY, "Menu size", &opts.menu_size, 0, 3, 1, tx_menu_size,
+    {TAB_GAMEPLAY, "FPS counter", &opts.show_fps, 0, fps_stats::kLevels - 1, 1, tx_fps_level,
+     "Frames per second in the top right corner, and as much more as you choose.", hn_fps, false, true},
+    {TAB_GAMEPLAY, "FPS counter position", &opts.fps_corner, 0, 3, 1, tx_fps_corner,
+     "The corner the FPS counter shows in. While this menu is open it shows at the top right.", nullptr, false, true},
+    {TAB_GAMEPLAY, "Menu size", &opts.menu_size, 1, 3, 1, tx_menu_size,
      "How large this menu, the FPS counter and the start-up screen are drawn.", hn_menu_size, false, true},
     {TAB_GAMEPLAY, "Game speed", &opts.realtime, 0, 1, 1, tx_speed, "How the game keeps time when it runs below 60 fps.",
      hn_speed},
     {TAB_GAMEPLAY, "Text speed", &opts.text_speed, 0, 3, 1, tx_text_speed,
-     "How fast the letters of dialogue and other messages appear.", hn_text_speed},
+     "How fast the letters of dialogue and other messages appear.", hn_text_speed, false, true},
     {TAB_GAMEPLAY, "Text size", &opts.text_size, 0, 4, 1, tx_text_size,
-     "How large the text of dialogue, Navi and signs is drawn.", hn_text_size},
+     "How large the text of dialogue, Navi and signs is drawn.", hn_text_size, false, true},
     {TAB_GAMEPLAY, "Microphone", &opts.mic, 0, 2 + kMaxMics, 1, tx_mic,
      "What the ocarina hears when the game's microphone option is on (playing an instrument, or humming).", hn_mic, false,
      true},
@@ -832,7 +972,7 @@ Row rows[] = {
 
     // Controls (12 rows; Motion opens the 6 TAB_MOTION rows, Controls its page with the 2 TAB_PAGE rows)
     {TAB_CONTROLS, "Controller in background", &opts.pad_background, 0, 1, 1, tx_onoff,
-     "Whether the controller plays the game while another window has the focus.", hn_background},
+     "Whether the controller plays the game while another window has the focus.", hn_background, false, true},
     {TAB_CONTROLS, "Mouse camera", &opts.mouse_native, 0, 1, 1, tx_mousecam, "How the captured mouse turns the camera.",
      hn_mousecam, false, true},
     {TAB_CONTROLS, "Disable camera centering", &opts.disable_camera_centering, 0, 1, 1, tx_onoff,
@@ -847,6 +987,9 @@ Row rows[] = {
      "Inverts horizontal look (left/right) on the right analog stick.", nullptr, false, true},
     {TAB_CONTROLS, "Invert camera Y", &opts.invert_cam_y, 0, 1, 1, tx_onoff,
      "Inverts vertical look (up/down) on the right analog stick.", nullptr, false, true},
+    {TAB_CONTROLS, "Camera speed", &opts.camera_speed, 50, 400, 25, tx_percent,
+     "How fast the right stick turns the camera, in percent of the game's own speed; the camera keys too, and the mouse "
+     "with Mouse camera As the stick. The game's own camera speed setting still applies.", nullptr, false, true},
     {TAB_CONTROLS, "Stick dead zone", &opts.stick_dead_zone, 0, 5, 1, tx_stick_dead_zone,
      "How far a stick moves before the game sees it, on each axis. Lower for a precise stick, higher for one that drifts. "
      "The game's own dead zone still follows.", nullptr, false, true},
@@ -873,21 +1016,22 @@ Row rows[] = {
      "Motion controls: aiming with the controller's gyroscope, its sensitivity and its inverts."},
     // (hookshot) the Controls page's own rows, above its grid (TAB_PAGE: no tab shows them)
     {TAB_PAGE, "Layout preset", &opts.pad_layout, 0, 3, 1, tx_pad_layout,
-     "Which face button is which. Binding one yourself on the Controls page makes it Custom.", hn_pad_layout},
+     "Which face button is which. Binding one yourself on the Controls page makes it Custom.", hn_pad_layout, false, true},
     {TAB_PAGE, "Button prompts", &opts.prompts, 0, HOS_PROMPT_N, 1, tx_prompts,
      "The button icons the game shows, in its texts and menus: those of this controller, for the buttons your controls "
      "put each action on.", hn_prompts, true, true},
     {TAB_CONTROLS, "Controls", nullptr, 0, 0, 0, nullptr,   // (hookshot: opens its page)
      "The layout preset, the button prompts, and which gamepad button and which keys press each of the Switch's "
      "buttons."},
-    {TAB_CONTROLS, "Menu shortcut", &opts.menu_shortcut, 0, 1, 1, tx_menu_shortcut,
-     "Which keys open and close this menu. F1 always does; F1 only leaves Insert free for an overlay.",
+    {TAB_CONTROLS, "Menu shortcut", &opts.menu_shortcut, 0, 2, 1, tx_menu_shortcut,
+     "Which keys open and close this menu. F1 always does; F1 only leaves Insert free for an overlay. With Esc, Esc opens it "
+     "too, as a PC game's pause menu (open, Esc still goes back a page or closes it).",
      nullptr, false, true},
     // Debug: the tools' switch, the tools themselves below it while they are on (cheat: menu_tick does what they do), then the
     // developer's rows
     {TAB_DEBUG, "Debug tools", &opts.debug_tools, 0, 1, 1, tx_onoff,
-     "Testing tools: no-clip flight, a free camera, teleport, Link's age, the inventory, the clock and heart protection. Off "
-     "puts flight, the free camera and heart protection away.", nullptr, false, true},
+     "Testing tools: no-clip flight, a free camera, teleport, Link's age, the inventory, the clock, heart protection and "
+     "movement speed. Off puts flight, the free camera and heart protection away and Link back to his own speed.", nullptr, false, true},
     {TAB_DEBUG, "Heart protection", nullptr, 0, 0, 0, nullptr,
      "Protects Link's hearts. Hits can still knock him back.", nullptr, false, true, 0},
     {TAB_DEBUG, "No-clip flight", nullptr, 0, 0, 0, nullptr,
@@ -910,13 +1054,21 @@ Row rows[] = {
      "Swaps Link between child and adult and reloads this map in the other age (the Market when this map has no match).", nullptr, false, true, 9},
     {TAB_DEBUG, "Inventory", nullptr, 0, 0, 0, nullptr,
      "Enter opens the inventory editor: unlock or relock equipment, items, upgrades and quest items, and change amounts.", nullptr, false, true, 10},
+    {TAB_DEBUG, "Movement speed", nullptr, 0, 0, 0, nullptr,
+     "How fast Link walks, runs and swims, as a multiple of his own speed. Choose with Left or Right.", nullptr, false, true, 11},
     {TAB_DEBUG, "Developer", nullptr, 0, 0, 0, nullptr, nullptr, nullptr, false, true, -1, true},
     {TAB_DEBUG, "Descriptor reuse", &opts.descriptor_reuse, 0, 1, 1, tx_onoff,
      "A draw keeps its descriptors while the texture slots it samples are unchanged, so streaming elsewhere in the game no longer "
-     "rebuilds every set each frame. Applies after restart.", nullptr, true},
+     "rebuilds every set each frame. Applies after restart.", nullptr, true, true},
     {TAB_DEBUG, "Sampler cache", &opts.sampler_cache, 0, 1, 1, tx_onoff,
      "What a sampler holds is kept beside it on the replay thread, so resolving a sampler that was not registered anew takes no "
-     "lock. Helps while the game streams textures. Applies after restart.", nullptr, true},
+     "lock. Helps while the game streams textures. Applies after restart.", nullptr, true, true},
+    {TAB_DEBUG, "Robust buffers", &opts.robust, 0, 2, 1, tx_robust,
+     "Bounds-checked buffer reads: a read past a buffer's end is dropped instead of stopping the GPU. Applies after a "
+     "restart.", hn_robust, true, true},
+    {TAB_DEBUG, "ASTC as RGBA8", &opts.astc_rgba8, 0, 1, 1, tx_onoff,
+     "Big ASTC textures kept as decoded RGBA8 instead of re-encoded to BC3: a workaround for texture artifacts seen on some AMD "
+     "cards (issues 57 and 1006). Takes far more video memory. Applies after restart.", hn_astc_rgba8, true, true},
     // (Restart and Quit stay the table's last two: kRestartRow and kQuitRow count back from its end)
     {TAB_GAMEPLAY, "Restart", nullptr, 0, 0, 0, nullptr,
      "Starts the game again. Save your progress first. Press Enter or A twice to restart. Esc or B "
@@ -935,7 +1087,12 @@ std::atomic<int> protect_hearts{-1};
 std::atomic<int> player_flight{-1};
 std::atomic<int> free_camera{0};
 std::atomic<int> cheat_action{0};
-std::atomic<int> link_age{-1};   // (the game side's report, OOT_CHEAT_AGE_ID: 0 child, 1 adult, -1 no save loaded)
+std::atomic<int> link_age{-1};
+// (Movement speed: the choice, an index of link_speeds; the game side reads it in percent, HOS_OPT_CHEAT_SPEED)
+constexpr int link_speeds[] = {100, 125, 150, 200, 300};
+constexpr const char* link_speed_names[] = {"1x", "1.25x", "1.5x", "2x", "3x"};
+constexpr int kLinkSpeeds = sizeof link_speeds / sizeof link_speeds[0];
+std::atomic<int> link_speed{0};   // (the game side's report, OOT_CHEAT_AGE_ID: 0 child, 1 adult, -1 no save loaded)
 int clock_hour = 12;
 int pouch_item = 0;
 int pouch_delta = 1;
@@ -1057,7 +1214,7 @@ void choose_inventory_filter(int filter) {
     inventory_amount = false;
     inventory_reveal();
 }
-constexpr int kCheatRows = 11;   // (the debug tools' rows: Row::cheat 0 to 10)
+constexpr int kCheatRows = 12;   // (the debug tools' rows: Row::cheat 0 to 11)
 /// A debug tool's value as its row shows it ("" an action: confirm does it)
 std::string cheat_value(int i) {
     char t[16];
@@ -1068,17 +1225,19 @@ std::string cheat_value(int i) {
     case 5: return pouch_items[pouch_item];
     case 6: return snprintf(t, sizeof t, "%+d", pouch_delta), t;
     case 7: return tx_onoff(free_camera.load());
+    case 11: return link_speed_names[std::clamp(link_speed.load(), 0, kLinkSpeeds - 1)];
     default: return "";
     }
 }
-/// The tools that choose with Left and Right (arrows at their value's ends): Set time, Inventory item, Change quantity
-bool cheat_chooses(int i) { return i == 4 || i == 5 || i == 6; }
+/// The tools that choose with Left and Right (arrows at their value's ends): Set time, Inventory item, Change quantity,
+/// Movement speed
+bool cheat_chooses(int i) { return i == 4 || i == 5 || i == 6 || i == 11; }
 /// Switch age as Kid | Adult, Link's age lit: once the game side has said it (a save loaded)
 bool age_shown(int i) { return i == 9 && link_age.load(std::memory_order_relaxed) >= 0; }
 /// What confirm does on a tool's row, for its prompt (nullptr: nothing)
 const char* cheat_confirm(int i) {
     static const char* const says[kCheatRows] = {"Toggle", "Toggle", "Apply", "Apply", "Set", nullptr, "Apply", "Toggle", "Open list",
-                                                 "Switch", "Open"};
+                                                 "Switch", "Open", nullptr};
     return i >= 0 && i < kCheatRows ? says[i] : nullptr;
 }
 constexpr int kRows = sizeof rows / sizeof rows[0];
@@ -1131,7 +1290,7 @@ int ask_sel = 0;   // (the restart question's choice: 0 Later, 1 Restart now)
 
 /// A row on its tab: the debug tools only with them on; a row for what this PC cannot run not at all (Reflex and Anti-Lag 2
 /// only where the driver has them, the Upscaler only where more than the game's own runs, the DLSS model only where DLSS
-/// runs); HDR's paper white and peak brightness only with HDR on. A row that comes or goes moves those after it: the
+/// runs); HDR's paper white, peak brightness and contrast only with HDR on. A row that comes or goes moves those after it: the
 /// selection is a place on its tab (tab_selected), so a row hidden after the selected one leaves the selection where it is,
 /// and menu_tick brings back one past the end
 bool row_shown(int i) {
@@ -1148,7 +1307,7 @@ bool row_shown(int i) {
            (v != &opts.antilag || antilag_available()) &&
            (v != &opts.dlss || ur::upscaler_shown(upscalers_available())) &&
            (v != &opts.dlss_model || ur::model_shown(dlss_why() == DLSS_OK)) &&
-           ((v != &opts.hdr_white && v != &opts.hdr_peak) || opts.hdr != 0);
+           ((v != &opts.hdr_white && v != &opts.hdr_peak && v != &opts.hdr_contrast) || opts.hdr != 0);
 }
 int tab_row_count(int t) {
     int c = 0;
@@ -1179,11 +1338,53 @@ constexpr int64_t kMarqueeStep = 150000000LL, kMarqueeRest = 1200000000LL;   // 
 int hover_tab = -1;
 int drag_row = -1;
 bool mouse_read = false;   // (the menu has read the mouse since it opened)
-bool is_slider(const Row& r) { return nr_slider(r.value) || r.value == &opts.dlss5_color || r.value == &opts.sharpness || r.value == &opts.mouse_sens || r.value == &opts.gyro_sens_x || r.value == &opts.gyro_sens_y || r.value == &opts.volume; }
+bool is_slider(const Row& r) { return nr_slider(r.value) || r.value == &opts.dlss5_color || r.value == &opts.sharpness || r.value == &opts.mouse_sens || r.value == &opts.gyro_sens_x || r.value == &opts.gyro_sens_y || r.value == &opts.volume || r.value == &opts.camera_speed; }
 /// (a scale: the arrows and a click stop at its ends; Rumble strength would go from Off to its strongest)
-bool stops_at_ends(const Row& r) { return nr_slider(r.value) || r.value == &opts.dlss5_color || r.value == &opts.mouse_sens || r.value == &opts.rumble || r.value == &opts.gyro_sens_x || r.value == &opts.gyro_sens_y || r.value == &opts.volume; }
+bool stops_at_ends(const Row& r) { return nr_slider(r.value) || r.value == &opts.dlss5_color || r.value == &opts.mouse_sens || r.value == &opts.rumble || r.value == &opts.gyro_sens_x || r.value == &opts.gyro_sens_y || r.value == &opts.volume || r.value == &opts.camera_speed; }
 /// (the ini's Rumble strength on the menu's steps: 0 to 150, the nearest 25)
 int rumble_step(int v) { return (std::min(std::max(v, 0), 150) + 12) / 25 * 25; }
+// (hookshot) A run's environment over a saved row (RX_VK_PACE=1, HOS_OUTPUT_RES=...): for that run only. save() writes the
+// player's own value while the row still holds the environment's; once the player changes the row, theirs is kept. (These
+// were copied into the row and the next save wrote them into hookshot_options.ini, so a test run's switch stayed for good)
+struct EnvOverride {
+    int* value;
+    int saved, forced;
+};
+EnvOverride env_overrides[16];
+int env_override_count = 0;
+void env_override(int* value, int v) {
+    for (int i = 0; i < env_override_count; i++)
+        if (env_overrides[i].value == value) {   // (the same row twice: the player's value is the first one)
+            *value = env_overrides[i].forced = v;
+            return;
+        }
+    if (env_override_count < (int)(sizeof env_overrides / sizeof env_overrides[0]))
+        env_overrides[env_override_count++] = {value, *value, v};
+    *value = v;
+}
+/// The value save() writes for a row: the player's, not the environment's
+int saved_value(int* value) {
+    for (int i = 0; i < env_override_count; i++) {
+        EnvOverride& o = env_overrides[i];
+        if (o.value != value) continue;
+        if (*value == o.forced) return o.saved;
+        o.value = nullptr;   // (changed in the menu: the player's choice from now on)
+    }
+    return *value;
+}
+/// The menu set the row (the player, a preset, the Upscaler's snap): its value is saved from now on, even where it is the
+/// one the environment forced
+void env_release(const int* value) {
+    for (int i = 0; i < env_override_count; i++)
+        if (env_overrides[i].value == value) env_overrides[i].value = nullptr;
+}
+/// Whether the environment still holds the row (saved_value has not seen the player change it)
+bool env_holds(const int* value) {
+    for (int i = 0; i < env_override_count; i++)
+        if (env_overrides[i].value == value) return true;
+    return false;
+}
+Out player_custom_output{0, 0};   // (the player's own Output resolution size when HOS_OUTPUT_RES names another of its own)
 std::string ini_path() {
     char exe[MAX_PATH];
     const DWORD n = game_module_path(exe, MAX_PATH);
@@ -1206,7 +1407,6 @@ const char* nr_ini_key(const int* value) {
     if (value == &opts.dlss5_color) return "dlss5_color";
     if (value == &opts.dlss5_history) return "dlss5_history";
     if (value == &opts.dlss5_debug) return "dlss5_debug";
-    if (value == &opts.dlss5_stats) return "dlss5_stats";
     if (value == &opts.dlss5_compare_mode) return "dlss5_compare_mode";
     if (value == &opts.dlss5_compare_top) return "dlss5_compare_top";
 
@@ -1215,12 +1415,14 @@ const char* nr_ini_key(const int* value) {
 const char* ini_key(const Row& r) {
     if (const char* nr = nr_ini_key(r.value)) return nr;
     if (r.value == &opts.output_res) return "output_res";   // (host/nn_applet.c reads it at the start)
+    if (r.value == &opts.vsync) return "vsync";
     // (rows renamed since their values were first saved keep their keys: an options file from before still loads)
     if (r.value == &opts.resolution) return "resolution";
     if (r.value == &opts.fps_cap) return "frame_rate_cap";   // (host/nn_vi.c reads it at the start)
     if (r.value == &opts.upscale) return "upscaling";
     if (r.value == &opts.dlss) return "dlss";   // (as opts.dlss and RX_VK_DLSS)
     if (r.value == &opts.handheld) return "handheld_profile";   // (the Profile row; host/nn_applet.c reads it at the start)
+    if (r.value == &opts.mesh_mode) return "mesh_shaders";   // (gpu/vk/vk_main.cpp reads it as the device is made)
     static char k[32];
     size_t n = 0;
     for (const char* p = r.name; *p && n + 1 < sizeof k; p++) k[n++] = *p == ' ' ? '_' : (char)tolower(*p);
@@ -1314,6 +1516,9 @@ void mic_chosen() {
 }
 int nr_persisted_value(const int* value);
 void save() {
+    // (one writer at a time: the present's thread, the game's (menu_option_set) and the control bridge's, menu_setting_set)
+    static std::mutex save_mu;
+    std::lock_guard lk(save_mu);
     // (hookshot) the lines that are not the menu's are kept: the controls, pad_ and key_ (host/nn_hid.c)
     // (and every other line the menu does not write, such as discord_app_id=: they were dropped at the next save)
     std::string kept, others;
@@ -1327,7 +1532,9 @@ void save() {
             const char* eq = strchr(line, '=');
             if (!eq || eq == line) continue;
             const std::string key(line, (size_t)(eq - line));
-            bool mine = key == "microphone_device" || key == "options_version";
+            // (memory_budget too: save() writes it, and the file's old line, kept after it, won at the next start)
+            // Retire the old NR overlay setting without changing FPS preferences.
+            bool mine = key == "dlss5_stats" || key == "microphone_device" || key == "options_version" || key == "memory_budget";
             for (const Row& r : rows)
                 if (!mine && r.value && key == ini_key(r)) mine = true;
             if (!mine) others += line, others += others.back() == '\n' ? "" : "\n";
@@ -1337,13 +1544,17 @@ void save() {
     if (FILE* f = fopen(ini_path().c_str(), "w")) {
         for (const Row& r : rows) {
             if (r.value == &opts.output_res) {   // (the size itself: host/nn_applet.c reads it)
-                const Out o = output_at(nr_persisted_value(r.value));
+                const int v = nr_persisted_value(r.value);
+                const Out o = v == kCustomOutput && player_custom_output.w && env_holds(r.value) ? player_custom_output : output_at(v);
                 fprintf(f, "%s=%ux%u\n", ini_key(r), o.w, o.h);
             } else if (r.value && r.value != &opts.dlss5_debug) {
                 fprintf(f, "%s=%d\n", ini_key(r), nr_persisted_value(r.value));
             }
         }
         if (!mic_want.empty()) fprintf(f, "microphone_device=%s\n", mic_want.c_str());   // (hookshot: also while it is unplugged)
+        // (not a row: the budgets Custom keeps. 0 too: with a preset on, the VRAM budget row chosen by the player, which the next
+        // start must not take back to the preset's)
+        fprintf(f, "memory_budget=%d\n", opts.budget);
         // (2: game_speed below 2 was only ever the old default, see menu_init; 3: the mouse's buttons are bindings, see
         // host/nn_hid.c binds_load; 4: Descriptor reuse on by default, see menu_init and vk_draw.cpp desc_slotgen_on)
         fprintf(f, "options_version=4\n");
@@ -1355,6 +1566,14 @@ void save() {
         }
         fclose(f);
     }
+}
+
+/// (hookshot) The Button prompts row: a new face shows at once where the game has every part of the prompts from
+/// host/prompts.c, nothing to restart for then; else, as the other restart rows, at the next start
+void prompts_at_once(const Row& r) {
+    if (r.value == &opts.prompts && host && host->prompts_live &&
+        (host->prompts_live() & HOS_PROMPTS_LIVE_ALL) == HOS_PROMPTS_LIVE_ALL)
+        restart_state.restart_value(restart_slot_of(r), *r.value);
 }
 
 /// A row's new value v, as the arrows set it (dir: 1 up, -1 down, for the rows that skip or wrap), saved unless !keep
@@ -1384,12 +1603,22 @@ void set_row(Row& r, int v, int dir, bool keep = true) {
     if (row_fixed(r.value)) return;
     if (!nr_prepare_row(r, v, dir)) return;
     // (the scaling rows: only what can run here; the Render resolution row through the Upscaler's own steps)
-    if (r.value == &opts.dlss) v = ur::step_upscaler(upscaler(), dir, upscalers_available());
-    if (r.value == &opts.resolution) v = ur::step(upscaler(), *r.value, dir);
+    // (the Upscaler by engine; the Render resolution's Native is the engine's full-size form: upscaler_rows.h)
+    if (r.value == &opts.dlss) v = ur::step_engine(upscaler(), dir, upscalers_available());
+    if (r.value == &opts.resolution) {
+        int up = upscaler(), res = *r.value;
+        ur::step_render(upscaler(), *r.value, dir, &up, &res);
+        if (up != upscaler()) opts.dlss = up;   // (Native in or out: DLAA / DLSS, FSR 4's native AA / FSR 4)
+        v = res;
+    }
     if (r.value == &opts.output_res) {   // (smallest to largest: step_output_choice)
         v = step_output_choice(*r.value, dir);
         if (v == *r.value) return;
     }
+    // (hookshot) the VRAM budget row steps past 2.2 GB: the Minimum (4GB) preset's, too few textures on a bigger card (a 12 GB
+    // card's walk made 2-3 times as many textures again as at Auto, 1% lows of 5-7 fps; hckrman101, #dev-work). The preset still
+    // sets it, and the row shows it then
+    if (r.value == &opts.vram_budget && v == kVramMinimumOnly) v += dir;
     if (stops_at_ends(r)) v = std::min(std::max(v, r.lo), r.hi);   // (a scale: it stops at its ends)
     if (r.value == &opts.pad_layout) {
         if (v > 2) v = dir > 0 ? 0 : 2;
@@ -1402,10 +1631,18 @@ void set_row(Row& r, int v, int dir, bool keep = true) {
     } else {
         *r.value = v > r.hi ? r.lo : v < r.lo ? r.hi : v;
         // (another Upscaler: the Render resolution moves to the nearest of its steps, DLSS's modes or the game's)
-        if (r.value == &opts.dlss) opts.resolution = ur::snap(upscaler(), opts.resolution);
-        if (!r.preset_exempt) {   // (the controls, the window and the counter are not the preset's)
+        if (r.value == &opts.dlss) {   // (a slider stop kept)
+            opts.resolution = ur::snap_render(upscaler(), opts.resolution);
+            env_release(&opts.resolution);
+        }
+        if (r.value == &opts.vram_budget) {   // (hookshot: set on the row, the budget is the player's, on any card)
+            opts.budget = 0;
+            vram_budget_sync();
+        }
+        if (!r.preset_exempt) {   // (rows no preset sets: the controls, the window, the counter...)
+            // (Custom, with the memory budgets of the preset it came from: they went with it, and Low (6GB) then a Resolution
+            // step left a 6 GB card without its texture cap, past its VRAM, and Streamline refused DLSS frames)
             opts.preset = 0; // Custom
-            sync_preset_budgets(0);
         }
     }
     nr_row_changed(r);
@@ -1413,6 +1650,7 @@ void set_row(Row& r, int v, int dir, bool keep = true) {
     // (hookshot: the samplers made again, at once: their anisotropy, and the upscalers' LOD bias, vk_draw.cpp upscale_lod_bias)
     if (r.value == &opts.anisotropy || r.value == &opts.dlss || r.value == &opts.resolution || r.value == &opts.preset)
         samplers_changed();
+    prompts_at_once(r);   // (hookshot)
     {   // (a row that takes a restart, or a preset that sets one: asked again at the next close)
         int now[mr::kMax];
         restart_values(now);
@@ -1530,7 +1768,7 @@ struct NrSaved {
     int requested, profile, mode, debug;
 } nr_saved;
 int nr_persisted_value(const int* value) {
-    if (!nr_comparison.active) return *value;
+    if (!nr_comparison.active) return saved_value(const_cast<int*>(value));
     if (value == &opts.dlss5) return nr_saved.requested;
     if (value == &opts.dlss5_profile) return nr_saved.profile;
     if (value == &opts.dlss5_color) return nr_saved.look.color;
@@ -1544,7 +1782,7 @@ int nr_persisted_value(const int* value) {
     if (value == &opts.dlss5_preset) return nr_saved.look.model.preset;
     if (value == &opts.dlss5_mask) return nr_saved.look.model.mask;
     if (value == &opts.dlss5_ui) return nr_saved.look.model.ui;
-    return *value;
+    return saved_value(const_cast<int*>(value));
 }
 int nr_compare_selected = 0;
 bool nr_toolbar_preview() {
@@ -1609,6 +1847,22 @@ std::atomic<float> startup_fade{0};   // (the start-up screen's fade to black at
 std::atomic<int64_t> game_frames{0}, shown_frames{0};
 char fps_text[48] = "";
 char fps_sub[32] = "";
+// (the FPS counter's levels past the number, written every half second by menu_tick: the frame time and its 1% low; the
+// Breakdown's parts, the GPU's time, the shaders built and draws left out over the graph's 4 s)
+char fps_ms_text[24] = "", fps_low_text[24] = "";
+double fps_ms_now = 0, fps_parts_now[fps_stats::kParts];   // (the frame time and the parts, for their colour and the bar)
+double fps_rate_now = 0;   // (the number's rate, the game's own with frame generation: its colour)
+char fps_part_text[fps_stats::kParts][24];
+char fps_gpu_text[24] = "";
+char fps_built_text[16] = "", fps_left_text[16] = "";
+int fps_cap_started = 0;   // (the Game frame rate cap the game started with: the graph's line)
+/// The FPS counter's target frame time, ms: the cap the game started with (HOS_FPS_MAX over it, as host/nn_vi.c), or the
+/// display's refresh with V-Sync On and no frame generation when that is slower; 0 for none (Uncapped without V-Sync)
+double fps_target_ms() {
+    static const int cap = fps_stats::cap_rate(fps_cap_started, getenv("HOS_FPS_MAX") ? atoi(getenv("HOS_FPS_MAX")) : 0);
+    const bool fifo = menu_vsync() == 1 && opts.framegen == 0;
+    return fps_stats::target_ms_for(cap, fifo, fifo ? (display_refresh_mhz() + 500) / 1000 : 0);
+}
 menu_hit::Map hits;      // (the menu's controls as last drawn: the mouse's, menu_tick)
 float scroll_at[TAB_DLSS5 + 2];   // (the first row shown, eased toward the selection: the options' tabs and the Motion page, then
                                    // the Controls page: kControlsSlot)
@@ -1621,7 +1875,7 @@ float ease_step = 0;     // (this drawing's share of the way: the time since the
 ui::Ctx ui_ctx(uint32_t w, uint32_t h) {
     ui::Ctx c{ImGui::GetForegroundDrawList(), ui::fonts(), 1, (float)w, (float)h, 0, pad_last};
     c.confirm_dot = menu_keys::dot(pad_confirm), c.back_dot = menu_keys::dot(pad_back);
-    c.s = ui::unit((float)h, opts.menu_size, opts.fullscreen != 0, auto_pad, &c.safe);
+    c.s = ui::unit((float)h, opts.menu_size, &c.safe);
     return c;
 }
 /// The banner's height
@@ -1843,7 +2097,6 @@ std::string restart_line(ui::Ctx& c, float px, float width) {
 }
 
 
-double nr_present_fps = 0;
 int nr_shortcut_pad() {
     for (const int button : {HOS_PAD_WEST,HOS_PAD_NORTH,HOS_PAD_SOUTH,HOS_PAD_EAST})
         if (button != pad_confirm && button != pad_back) return button;
@@ -1880,8 +2133,8 @@ void draw_nr_compare(ui::Ctx& c, bool preview) {
 /// (hookshot) The Debug tab's order: the tools' rows by their group (Row::cheat), Up and Down walking them so; Inventory item
 /// and Change quantity are not shown (the Inventory page edits every amount)
 struct DebugGroup { const char* title; int from, to; };   // (debug_tools_order[from, to))
-constexpr int debug_tools_order[] = {0, 1, 9, 10, 8, 2, 3, 7, 4};
-constexpr DebugGroup debug_groups[] = {{"Player", 0, 4}, {"Travel", 4, 7}, {"Camera & world", 7, 9}};
+constexpr int debug_tools_order[] = {0, 1, 11, 9, 10, 8, 2, 3, 7, 4};
+constexpr DebugGroup debug_groups[] = {{"Player", 0, 5}, {"Travel", 5, 8}, {"Camera & world", 8, 10}};
 constexpr int kDebugGroups = sizeof debug_groups / sizeof debug_groups[0];
 constexpr int kDebugTools = sizeof debug_tools_order / sizeof debug_tools_order[0];
 /// The Debug tab's rows as shown (its row numbers, tab_row_to_global's): the switch, the tools in debug_tools_order while they
@@ -1928,9 +2181,14 @@ void draw_debug_rows(ui::Ctx& c, float cx0, float cx1, float top, float bottom, 
         const float pad = (tight ? 36 : 64) * s;
         if (r.cheat == 9 && age_shown(9))
             return 2 * std::max(ui::size_of(c.f.strong, px, "Kid").x, ui::size_of(c.f.strong, px, "Adult").x) + pad;
+        if (r.value && r.hi - r.lo != r.step) {   // (a Developer row of more than two values, Robust buffers: its widest, arrows)
+            float w = 0;
+            for (int v = r.lo; v <= r.hi; v += r.step) w = std::max(w, ui::size_of(c.f.strong, px, r.text(v)).x);
+            return w + (tight ? 56 : 68) * s;
+        }
         if (r.cheat == 0 || r.cheat == 1 || r.cheat == 7 || r.value) return halves_w + pad;
-        const std::string v = cheat_value(r.cheat);
-        const char* const says[kCheatRows] = {"", "", "Mark", "Return", "", "", "", "", "Choose map", "Switch", "Edit items"};
+        const std::string v = r.cheat == 11 ? "1.25x" : cheat_value(r.cheat);   // (Movement speed: its widest, the cell kept still)
+        const char* const says[kCheatRows] = {"", "", "Mark", "Return", "", "", "", "", "Choose map", "Switch", "Edit items", ""};
         return ui::size_of(c.f.strong, px, v.empty() ? says[r.cheat] : v.c_str()).x + (cheat_chooses(r.cheat) ? 68 : tight ? 56 : 60) * s;   // (choice_cell keeps 48 for arrows either way)
     };
     float name_need[2] = {0, 0}, cell_full[2] = {halves_w + 64 * s, halves_w + 64 * s}, cell_tight[2] = {halves_w + 36 * s, halves_w + 36 * s};
@@ -1981,7 +2239,7 @@ void draw_debug_rows(ui::Ctx& c, float cx0, float cx1, float top, float bottom, 
     for (int g = 0; tools && g < kDebugGroups; ++g)
         heading(head_col[g] ? mid + gap * .5f : left, !two || head_col[g] ? right : mid - gap * .5f, head_row[g], debug_groups[g].title);
     if (dev_head >= 0 && n > dev) heading(left, right, dev_row, rows[tab_row_to_global(TAB_DEBUG, dev_head)].name);
-    const char* const buttons[kCheatRows] = {"", "", "Mark", "Return", "", "", "", "", "Choose map", "Switch", "Edit items"};
+    const char* const buttons[kCheatRows] = {"", "", "Mark", "Return", "", "", "", "", "Choose map", "Switch", "Edit items", ""};
     for (int i = 0; i < n; ++i) {
         const int k = order[i];
         const Row& r = rows[tab_row_to_global(TAB_DEBUG, k)];
@@ -1994,7 +2252,10 @@ void draw_debug_rows(ui::Ctx& c, float cx0, float cx1, float top, float bottom, 
         const float width = in_tools ? cell_w[vcol[i]] : std::max(need(r, false), cell_w[two ? 1 : 0]);
         const ImVec2 va(x1 - width, y), vb(x1, y + rh);
         name_cell(c, ImVec2(x0, y), ImVec2(va.x, y + rh), r.name, selected, restart_changed(r));   // (boxed, as on the other tabs)
-        if (r.value) {   // (Debug tools and the Developer rows: values of the options, Off and On)
+        if (r.value && r.hi - r.lo != r.step) {   // (Robust buffers: Auto, Off, On, with arrows as on the other tabs)
+            const bool fixed = row_fixed(r.value);
+            choice_cell(c, va, vb, r.text(*r.value), selected, !fixed, !fixed, fixed);
+        } else if (r.value) {   // (Debug tools and the Developer rows: values of the options, Off and On)
             halves_cell(c, va, vb, std::string(r.text(r.lo)).c_str(), std::string(r.text(r.hi)).c_str(), *r.value == r.hi, selected,
                         row_fixed(r.value));
         } else if (r.cheat == 0 || r.cheat == 1 || r.cheat == 7) {
@@ -2048,9 +2309,14 @@ void draw_options_content(ui::Ctx& c) {
     {   // (which build, at the banner's left, so a report can say it without opening the log; the release alone when the whole
         // line would run into the tabs)
         std::string ver = std::string("Hookshot ") + HOOKSHOT_VERSION;
-        const float room = (c.w - total) * 0.5f - 60 * s - c.safe;
-        if (ui::size_of(c.f.body, 15 * s, ver.c_str()).x > room && ver.find(" (") != std::string::npos) ver.resize(ver.find(" ("));
-        if (ui::size_of(c.f.body, 15 * s, ver.c_str()).x <= room) ui::text_mid(c, c.f.body, 15 * s, c.safe, ty, ui::kBannerInk, ver.c_str());
+        const float room = (c.w - total) * 0.5f - 60 * s - c.safe, px = 15 * s;
+        const auto width = [&](float p) { return ui::size_of(c.f.body, p, ver.c_str()).x; };
+        if (width(px) > room && ver.find(" (") != std::string::npos) ver.resize(ver.find(" ("));
+        // (still too long, as a source build's "v2.0.11-821-g7b81752-dirty" since the Audio tab: at Small and Medium smaller
+        // until it fits, on half-point steps, 10 points at the least; at Large, the size for a TV across the room, at its size
+        // or not at all, as before)
+        const float fit = ui::fit_px(px, opts.menu_size == 3 ? px : kVersionMinPt * s, 0.5f * s, room, width);
+        if (fit > 0) ui::text_mid(c, c.f.body, fit, c.safe, ty, ui::kBannerInk, ver.c_str());
     }
     // the rows, in the column; the help beside it
     float cx0, cx1, hx0, hx1;
@@ -2401,7 +2667,7 @@ void draw_inventory(ui::Ctx& c) {
             px0 = nx + side + 18 * s;
         }
         char range[64];
-        snprintf(range, sizeof range, "%dâ€“%d of %d", first - begin + 1, std::min(end, first + inventory_capacity) - begin, end - begin);
+        snprintf(range, sizeof range, "%dÃ¢â‚¬â€œ%d of %d", first - begin + 1, std::min(end, first + inventory_capacity) - begin, end - begin);
         ui::text_mid(c, c.f.body, 15 * s, px0, my, ui::kSoft, range);
         if (have >= 0) {
             const float bw = ui::size_of(c.f.strong, 18 * s, "Edit amount").x + 36 * s;
@@ -2523,7 +2789,7 @@ void draw_teleport(ui::Ctx& c) {
         c.d->PushClipRect(ImVec2(left, detail), ImVec2(a.x - 12 * s, detail + strip), true);
         ui::text_mid(c, c.f.strong, 18 * s, left, my - 10 * s, ui::kInkBright, teleport_names[teleport_choice]);
         char where[64];
-        snprintf(where, sizeof where, note ? "%s Â· %s" : "%s", teleport_sections[teleport_section_of(teleport_choice)].name, note);
+        snprintf(where, sizeof where, note ? "%s Ã‚Â· %s" : "%s", teleport_sections[teleport_section_of(teleport_choice)].name, note);
         ui::text_mid(c, c.f.body, 15 * s, left, my + 12 * s, ui::kAccent, where);
         c.d->PopClipRect();
         ui::button(c, a, b, "Travel", false);
@@ -2557,27 +2823,22 @@ void draw_ask(ui::Ctx& c) {
 }
 
 void draw_menu(ui::Ctx& c);
-/// The menu's text sizes at this window's unit (and, with Menu size Auto, at the other size Auto can pick), baked ahead by
-/// vk_imgui.cpp a few a frame: the first open then draws with no glyphs to make (it took 2.6 ms at 1080p)
-float prebaked[3] = {0, 0, 0};   // (the units and the width prebake last did)
-/// The menu's units now (with Auto, both it can pick) for a window w x h: whether prebake has not done them yet
+/// The menu's text sizes at this window's unit, baked ahead by vk_imgui.cpp a few a frame: the first open then draws with no
+/// glyphs to make (it took 2.6 ms at 1080p)
+float prebaked[2] = {0, 0};   // (the unit and the width prebake last did)
+/// The menu's unit now for a window w x h: whether prebake has not done it yet
 bool prebake_needed(uint32_t w, uint32_t h) {
     float m = 0;
-    const float u0 = ui::unit((float)h, opts.menu_size, opts.fullscreen != 0, auto_pad, &m);
-    const float u1 = opts.menu_size == 0 ? ui::unit((float)h, 0, opts.fullscreen != 0, !auto_pad, &m) : u0;
-    return u0 != prebaked[0] || u1 != prebaked[1] || (float)w != prebaked[2];
+    return ui::unit((float)h, opts.menu_size, &m) != prebaked[0] || (float)w != prebaked[1];
 }
 void prebake(const ui::Ctx& c) {
-    float units[2] = {c.s, c.s}, margins[2] = {c.safe, c.safe};
-    if (opts.menu_size == 0) units[1] = ui::unit(c.h, 0, opts.fullscreen != 0, !auto_pad, &margins[1]);
-    if (units[0] == prebaked[0] && units[1] == prebaked[1] && c.w == prebaked[2]) return;
-    prebaked[0] = units[0], prebaked[1] = units[1], prebaked[2] = c.w;
+    if (c.s == prebaked[0] && c.w == prebaked[1]) return;
+    prebaked[0] = c.s, prebaked[1] = c.w;
     static const float points[] = {12, 12.5f, 13, 13.6f, 14, 14.28f, 14.5f, 15, 15.5f, 16, 16.5f, 17, 18, 18.5f, 19, 20, 21, 23, 24};
     constexpr int n = sizeof points / sizeof points[0];
-    float px[2 * n];
-    for (int u = 0; u < 2; u++)
-        for (int i = 0; i < n; i++) px[u * n + i] = points[i] * units[u];
-    ui::prebake(px, units[1] == units[0] ? n : 2 * n);
+    float px[n];
+    for (int i = 0; i < n; i++) px[i] = points[i] * c.s;
+    ui::prebake(px, n);
     if (open_now.load(std::memory_order_relaxed)) return;
     // (and the page itself drawn once into a list of its own, thrown away: what the first open would measure and bake (the
     // help's height over every row, the exact sizes) done now, the menu's state as it was)
@@ -2596,10 +2857,9 @@ void prebake(const ui::Ctx& c) {
     scratch.PushTexture(ImGui::GetIO().Fonts->TexRef);
     scratch.PushClipRectFullScreen();
     ease_step = 0;
-    for (int u = 0; u < (units[1] == units[0] ? 1 : 2); u++) {
+    {
         ui::Ctx dry = c;
         dry.d = &scratch;
-        dry.s = units[u], dry.safe = margins[u];
         draw_menu(dry);
     }
     hits = saved_hits, marquee_max = saved_marquee, ease_step = saved_ease;
@@ -2639,38 +2899,253 @@ void draw_menu(ui::Ctx& c) {
     // (the draw list's current header, for whatever is drawn next: the window's again after the pages' pops)
 }
 
-/// The FPS counter: a plate in the safe area's top right corner (under the banner while the menu is open)
-void draw_fps(ui::Ctx& c, bool under_banner) {
-    const float s = c.s, px = 24 * s;
-    const float nw = ui::size_of(c.f.heading, px, fps_text).x, sw = fps_sub[0] ? ui::size_of(c.f.body, 12.5f * s, fps_sub).x : 0;
-    const bool nr = opts.dlss5_stats && (!open_now.load(std::memory_order_relaxed) || nr_comparison.active);
-    char details[3][96]{};
-    float bw = std::max(nw + 54 * s, sw + 24 * s);
-    const float header_h = fps_sub[0] ? 48 * s : 34 * s;
-    if (nr) {
-        const auto stats = dlss_nr_stats();
-        snprintf(details[0], sizeof details[0], "Frame %.2f ms", nr_present_fps > 0 ? 1000 / nr_present_fps : 0);
-        if (stats.gpu_ms >= 0) snprintf(details[1], sizeof details[1], "NR GPU %.3f ms", stats.active ? stats.gpu_ms : 0.0);
-        else snprintf(details[1], sizeof details[1], "NR GPU n/a");
-        if (stats.width && stats.height) snprintf(details[2], sizeof details[2], "NR %ux%u", stats.width, stats.height);
-        else snprintf(details[2], sizeof details[2], "NR resolution n/a");
-        for (const auto& line : details) bw = std::max(bw, ui::size_of(c.f.body, 12.5f * s, line).x + 24 * s);
+/// Text with a dark outline (each side, one step of the scale), as the counter always had: readable over any scene
+void outlined_right(ui::Ctx& c, ImFont* font, float px, float right, float top, ImU32 col, const char* t) {
+    const float x = right - ui::size_of(font, px, t).x, o = std::max(1.0f, c.s);
+    for (int dy = -1; dy <= 1; dy++)
+        for (int dx = -1; dx <= 1; dx++)
+            if (dx || dy) c.d->AddText(font, px, ImVec2(x + dx * o, top + dy * o), ui::rgba(0, 0, 0, 230), t);
+    c.d->AddText(font, px, ImVec2(x, top), col, t);
+}
+
+/// (the FPS counter's lines past the number) Text with a soft shadow: a thin dark outline, lighter than the number's, and a
+/// darker copy a step down, so it reads over sand and sky as over a dungeon. Digits on even steps (tabular: the widest
+/// digit's advance), so a changing value does not shift
+struct Tab {
+    ImFont* font;
+    float px, digit;
+    Tab(ImFont* f, float size) : font(f), px(size), digit(0) {
+        char d[2] = {0, 0};
+        for (char k = '0'; k <= '9'; k++) d[0] = k, digit = std::max(digit, ui::size_of(f, size, d).x);
     }
-    const float bh = header_h + (nr ? 49 * s : 0);
-    // (the window's top right corner, where it is in play; under the banner while the menu is open, unless the window is so
-    // much wider than 16:9 that the plate fits beside the centred column's banner, in the corner)
-    const bool beside = menu_ox >= bw + 2 * c.safe;
-    float y = under_banner && page != 5 && !beside ? banner_h(c) + 10 * s : c.safe;
-    if (nr_comparison.active && opts.dlss5_compare_top) y = std::max(y, c.safe + 82 * s);
-    const ImVec2 a(c.w - c.safe - bw, y), b = a + ImVec2(bw, bh);
-    c.d->AddRectFilled(a, b, ui::rgba(30, 23, 15, 236));
-    c.d->AddRect(a, b, ui::kBoxEdge, 0, std::max(1.0f, s));
-    ui::text_mid(c, c.f.heading, px, a.x + 12 * s, a.y + 17 * s, ui::rgba(246, 236, 214), fps_text);
-    ui::text_mid(c, c.f.strong, 12 * s, a.x + 17 * s + nw, a.y + 17 * s, ui::kAccent, "FPS");
-    if (fps_sub[0]) ui::text_mid(c, c.f.body, 12.5f * s, a.x + 12 * s, a.y + 37 * s, ui::kSoft, fps_sub);
-    if (nr)
-        for (int i = 0; i < 3; ++i)
-            ui::text_mid(c, c.f.body, 12.5f * s, a.x + 12 * s, a.y + header_h + (9 + 15 * i) * s, ui::kSoft, details[i]);
+    static bool dig(char c) { return c >= '0' && c <= '9'; }
+    /// Each piece of t: a digit alone (in its even cell), or a run of what is not one (drawn whole). fn(begin, end, x, width)
+    template <class Fn>
+    float pieces(const char* t, float x, Fn fn) const {
+        const float x0 = x;
+        for (const char* q = t; *q;) {
+            const char* e = q + 1;
+            if (!dig(*q))
+                while (*e && !dig(*e)) e++;
+            const float w = dig(*q) ? digit : font->CalcTextSizeA(px, FLT_MAX, 0, q, e).x;
+            fn(q, e, x, w);
+            x += w, q = e;
+        }
+        return x - x0;
+    }
+    float width(const char* t) const { return pieces(t, 0, [](const char*, const char*, float, float) {}); }
+    /// Each piece five times under itself (a faint copy at each diagonal step, a darker one a step down) and once in col: a
+    /// dozen strings make a few hundred quads' worth of glyphs, not a glyph each ten times
+    void draw(ImDrawList* d, float x, float y, ImU32 col, const char* t, float s) const {
+        const float o = std::max(1.0f, s);
+        const int a = std::max(200, (int)((col >> IM_COL32_A_SHIFT) & 0xff));
+        const ImU32 shade = ui::rgba(0, 0, 0, a * 210 / 255), faint = ui::rgba(0, 0, 0, a * 160 / 255);
+        pieces(t, x, [&](const char* q, const char* e, float px0, float w) {
+            if (*q == ' ' && e == q + 1) return;
+            const float gx = px0 + (dig(*q) ? (w - font->CalcTextSizeA(px, FLT_MAX, 0, q, e).x) * 0.5f : 0);
+            static const float dx[4] = {-1, 1, -1, 1}, dy[4] = {-1, -1, 1, 1};
+            for (int k = 0; k < 4; k++) d->AddText(font, px, ImVec2(gx + dx[k] * o * 0.8f, y + dy[k] * o * 0.8f), faint, q, e);
+            d->AddText(font, px, ImVec2(gx, y + o), shade, q, e);
+            d->AddText(font, px, ImVec2(gx, y), col, q, e);
+        });
+    }
+};
+
+/// The FPS counter, in the corner the FPS counter position row chooses (the safe area's; under the banner at the top right
+/// while the menu is open, unless it fits beside the menu's column on a very wide window). The number as it always looked:
+/// green outlined bold, "FPS" small beside it, the frame generation line under them, no plate (#1957, v2.0.14's paint_fps).
+/// Past FPS (the row's levels, fps_stats.h), a tidy column under it, aligned to the same edge, with the same soft-shadowed
+/// text and no plate either: the frame time (green, amber or red against the cap's) and the 1% low; the graph of the last
+/// 4 s, a thin line over a soft fill, one column a frame span with its slowest frame (a stutter never falls between two), a
+/// faint dashed line at the cap's frame time, red ticks over frames past twice it; the Breakdown's bar of where the time
+/// goes, its legend with the values, the GPU's time and the stutters' causes (their columns get a red tick too).
+void draw_fps(ui::Ctx& c, bool under_banner) {
+    namespace fs = fps_stats;
+    int level = fs::level_of(opts.show_fps);
+    const float s = c.s, big = 28 * s, small = 13 * s, label = 12 * s;
+    const ImU32 green = ui::rgba(72, 255, 110), ink = ui::kInkBright, dim = ui::kSoft, soft = ui::kInk;
+    const Tab num(c.f.strong, big), tab(c.f.strong, small), lab(c.f.strong, label);
+    const float nw = num.width(fps_text), lw = ui::size_of(c.f.strong, small, "FPS").x;
+    const float sw = fps_sub[0] ? tab.width(fps_sub) : 0;
+    const float gw = 208 * s;   // (the column's width from the graph on)
+    // (while the menu is open: the top right under the banner, the number and the frame time only, unless the window is so much
+    // wider than 16:9 that the column fits beside the menu's, in its own corner)
+    const bool beside = menu_ox >= (level >= fs::kGraph ? gw : nw + lw) + 2 * c.safe + 8 * s;
+    int corner = std::clamp(opts.fps_corner, 0, 3);
+    if (under_banner && !beside) corner = 0, level = std::min(level, (int)fs::kFrameTime);
+    const bool left = corner & 1, bottom = corner >= 2;
+    // (the column's height, to anchor it at the bottom)
+    const float row = 17 * s, gh = 50 * s, lh = 16 * s;
+    float h = 32 * s + (fps_sub[0] ? row : 0);
+    if (level >= fs::kFrameTime && fps_ms_text[0]) h += row;
+    if (level >= fs::kGraph) h += 8 * s + gh + 4 * s;
+    if (level >= fs::kBreakdown) h += 10 * s + 6 * s + 4 * lh + 6 * s + 3 * lh;
+    const float edge = left ? c.safe : c.w - c.safe;
+    const float top = bottom ? c.h - c.safe - h : under_banner && page != 5 && !beside ? banner_h(c) + 10 * s : c.safe;
+    // (x for a width at the column's edge)
+    const auto at = [&](float w) { return left ? edge : edge - w; };
+    // (the number's colour: at FPS the classic green whatever the rate, the counter as it always was (#1957); from Frame time on
+    // green at the cap's rate, amber under it, red under two thirds of it, as the frame time beside it)
+    const double target = fps_target_ms();   // (0: none, Uncapped: the colours against the console's 60, no line)
+    const ImU32 grade_col[3] = {green, ui::rgba(255, 200, 60), ui::rgba(255, 95, 80)};
+    const ImU32 num_col = level >= fs::kFrameTime && fps_rate_now > 0 ? grade_col[fs::rate_grade(fps_rate_now, target)] : green;
+    {   // (the number and "FPS", as they always looked: outlined, the number's digits on even steps)
+        const float x = at(nw + 4 * s + lw), o = std::max(1.0f, s);
+        for (int dy = -1; dy <= 1; dy++)
+            for (int dx = -1; dx <= 1; dx++)
+                if (dx || dy) {
+                    float gx = x;
+                    char one[2] = {0, 0};
+                    for (const char* q = fps_text; *q; q++) {
+                        one[0] = *q;
+                        const float adv = ui::size_of(c.f.strong, big, one).x;
+                        c.d->AddText(c.f.strong, big, ImVec2(gx + (num.digit - adv) * 0.5f + dx * o, top + dy * o), ui::rgba(0, 0, 0, 230), one);
+                        gx += num.digit;
+                    }
+                    c.d->AddText(c.f.strong, small, ImVec2(x + nw + 4 * s + dx * o, top + 14 * s + dy * o), ui::rgba(0, 0, 0, 230), "FPS");
+                }
+        float gx = x;
+        char one[2] = {0, 0};
+        for (const char* q = fps_text; *q; q++) {
+            one[0] = *q;
+            const float adv = ui::size_of(c.f.strong, big, one).x;
+            c.d->AddText(c.f.strong, big, ImVec2(gx + (num.digit - adv) * 0.5f, top), num_col, one);
+            gx += num.digit;
+        }
+        c.d->AddText(c.f.strong, small, ImVec2(x + nw + 4 * s, top + 14 * s), num_col, "FPS");
+    }
+    float y = top + 32 * s;
+    if (fps_sub[0]) tab.draw(c.d, at(sw), y, soft, fps_sub, s), y += row;
+    if (level < fs::kFrameTime) return;
+    if (fps_ms_text[0]) {   // ("16.7 ms" in the colour of its distance from the cap's frame time, "1% low 58" beside it)
+        const ImU32 ms_col = grade_col[fps_ms_now > 0 ? fs::rate_grade(1000.0 / fps_ms_now, target) : 0];
+        const float mw = tab.width(fps_ms_text), gap = 10 * s, low_w = tab.width(fps_low_text);
+        const float x = at(mw + gap + low_w);
+        tab.draw(c.d, x, y, ms_col, fps_ms_text, s);
+        tab.draw(c.d, x + mw + gap, y, soft, fps_low_text, s);
+        y += row;
+    }
+    if (level < fs::kGraph) return;
+    // (the graph)
+    constexpr int kCols = 104;
+    static fs::Frame col[kCols];
+    static bool mark[kCols];
+    // (the columns from the ring at most 60 times a second: at the cap Uncapped's 1000 fps, 4 s of frames each present cost
+    // more than the drawing; a 4 s graph moves a column every 40 ms)
+    static double topms = 0;
+    static int64_t graph_at = 0;
+    if (const int64_t now = fps_clock(); now - graph_at >= fs::kSecond / 60 || now < graph_at) {
+        graph_at = now;
+        (void)fps_graph(now, kCols, col, mark);
+        static float ms[kCols];   // (the scale from the usual frame, not the slowest: a spike past the top is drawn at it, and marked)
+        int k = 0;
+        for (int i = 0; i < kCols; i++)
+            if (col[i].ms > 0) ms[k++] = col[i].ms;
+        topms = fs::graph_top(target, fs::typical_ms(ms, k));
+    }
+    const bool parts = level >= fs::kBreakdown;
+    const float x0 = at(gw), x1 = x0 + gw, gy0 = y + 8 * s, gy1 = gy0 + gh;
+    const float cw = gw / kCols, py = (float)(gh / topms);
+    const float thin = std::max(1.0f, 1.75f * s);
+    const ImU32 line_col = ui::rgba(130, 240, 150), fill_top = ui::rgba(120, 225, 140, 80), fill_bot = ui::rgba(120, 225, 140, 0);
+    // (the floor: a faint line; the cap's frame time: a dashed one, its value at the inner end)
+    c.d->AddLine(ImVec2(x0, std::floor(gy1) + 0.5f), ImVec2(x1, std::floor(gy1) + 0.5f), ui::rgba(255, 255, 255, 60), std::max(1.0f, s));
+    {
+        // (the scale's two values outside the graph, on its inner side: the cap's frame time at its line, the top at the top)
+        char t[16];
+        if (target > 0) {   // (Uncapped without V-Sync: no line)
+            const float ty = std::floor(gy1 - (float)target * py) + 0.5f, dash = 4 * s, gap = 3 * s;
+            for (float x = x0; x < x1; x += dash + gap)
+                c.d->AddLine(ImVec2(x, ty), ImVec2(std::min(x + dash, x1), ty), ui::rgba(255, 255, 255, 110), std::max(1.0f, s));
+            snprintf(t, sizeof t, "%.1f", target);
+            lab.draw(c.d, left ? x1 + 5 * s : x0 - 5 * s - lab.width(t), ty - label * 0.55f, ui::rgba(235, 235, 235), t, s);
+        }
+        snprintf(t, sizeof t, topms < 10 ? "%.1f" : "%.0f", topms);
+        lab.draw(c.d, left ? x1 + 5 * s : x0 - 5 * s - lab.width(t), gy0 - label * 0.55f, ui::rgba(200, 200, 200), t, s);
+    }
+    // (the soft fill: a column each, fading down; then the line over it, broken where a column had no frame, a faint dark line
+    // under it for the bright scenes)
+    static ImVec2 pts[kCols];
+    const auto yv = [&](float ms) { return std::max(gy0, gy1 - ms * py); };
+    // (the columns with a frame, joined across those without: a slow stretch has fewer frames than columns)
+    int n = 0;
+    for (int i = 0; i < kCols; i++)
+        if (col[i].ms > 0) pts[n++] = ImVec2(x0 + (i + 0.5f) * cw, yv(col[i].ms));
+    if (n >= 2) {   // (the fill: a quad under each segment, its colour at the line fading to nothing at the floor)
+        const ImVec2 uv = ImGui::GetFontTexUvWhitePixel();
+        c.d->PrimReserve((n - 1) * 6, (n - 1) * 4);
+        for (int k = 0; k + 1 < n; k++) {
+            const ImDrawIdx i0 = (ImDrawIdx)c.d->_VtxCurrentIdx;
+            c.d->PrimWriteVtx(pts[k], uv, fill_top);
+            c.d->PrimWriteVtx(pts[k + 1], uv, fill_top);
+            c.d->PrimWriteVtx(ImVec2(pts[k + 1].x, gy1), uv, fill_bot);
+            c.d->PrimWriteVtx(ImVec2(pts[k].x, gy1), uv, fill_bot);
+            c.d->PrimWriteIdx(i0), c.d->PrimWriteIdx((ImDrawIdx)(i0 + 1)), c.d->PrimWriteIdx((ImDrawIdx)(i0 + 2));
+            c.d->PrimWriteIdx(i0), c.d->PrimWriteIdx((ImDrawIdx)(i0 + 2)), c.d->PrimWriteIdx((ImDrawIdx)(i0 + 3));
+        }
+    }
+    if (n == 1) pts[n++] = ImVec2(pts[0].x + 1, pts[0].y);
+    if (n >= 2) {
+        static ImVec2 under[kCols];
+        for (int k = 0; k < n; k++) under[k] = ImVec2(pts[k].x, pts[k].y + std::max(1.0f, s));
+        c.d->AddPolyline(under, n, ui::rgba(0, 0, 0, 150), ImDrawFlags_None, thin + std::max(1.0f, s));
+        c.d->AddPolyline(pts, n, line_col, ImDrawFlags_None, thin);
+    }
+    // (red ticks: spikes, frames past twice the cap's and half again the graph's usual (a steady slow stretch is not a row of
+    // them), and with the Breakdown the frames that built shaders or left draws out)
+    float usual = 0;
+    {
+        int k = 0;
+        for (int i = 0; i < kCols; i++)
+            if (col[i].ms > 0) usual += col[i].ms, k++;
+        usual = k ? usual / k : 0;
+    }
+    for (int i = 0; i < kCols; i++)
+        if ((col[i].ms > 2 * target && col[i].ms > 1.5f * usual) || col[i].ms > topms || (parts && mark[i])) {   // (no target: past half again the usual)
+            const float cx = x0 + (i + 0.5f) * cw;
+            c.d->AddCircleFilled(ImVec2(cx, gy0 - 3 * s), 2.2f * s, ui::rgba(0, 0, 0, 120));
+            c.d->AddCircleFilled(ImVec2(cx, gy0 - 3 * s), 1.6f * s, ui::rgba(240, 100, 85));
+        }
+    if (!parts) return;
+    // (the Breakdown: where the half second's frame time went, as a bar, then a legend with the values, then the rest)
+    static const ImU32 part_col[fs::kParts] = {ui::rgba(110, 170, 230), ui::rgba(180, 140, 225), ui::rgba(226, 160, 80),
+                                                ui::rgba(130, 128, 118)};
+    static const char* const names[fs::kParts] = {"Game", "Renderer", "GPU wait", "Pacing"};
+    float by = gy1 + 10 * s;
+    {
+        const float bh = 6 * s, r = 3 * s;
+        double sum = 0;
+        for (double v : fps_parts_now) sum += v;
+        c.d->AddRectFilled(ImVec2(x0 - 1, by - 1), ImVec2(x1 + 1, by + bh + 1), ui::rgba(0, 0, 0, 90), r);
+        float x = x0;
+        for (int p = 0; p < fs::kParts && sum > 0; p++) {
+            const float w = (float)(gw * fps_parts_now[p] / sum);
+            if (w <= 0) continue;
+            const ImDrawFlags round = (x <= x0 + 0.5f ? ImDrawFlags_RoundCornersLeft : 0) |
+                                      (x + w >= x1 - 0.5f ? ImDrawFlags_RoundCornersRight : 0);
+            c.d->AddRectFilled(ImVec2(x, by), ImVec2(std::min(x + w, x1), by + bh), part_col[p], round ? r : 0, round ? round : ImDrawFlags_RoundCornersNone);
+            x += w;
+        }
+        by += bh + 6 * s;
+    }
+    const auto line = [&](ImU32 dot, const char* name, const char* value, ImU32 value_col) {
+        float nx = x0;
+        if (dot) {
+            c.d->AddCircleFilled(ImVec2(x0 + 4 * s, by + lh * 0.5f), 3.2f * s, ui::rgba(0, 0, 0, 110));
+            c.d->AddCircleFilled(ImVec2(x0 + 4 * s, by + lh * 0.5f), 2.6f * s, dot);
+            nx += 12 * s;
+        }
+        lab.draw(c.d, nx, by + 1 * s, soft, name, s);
+        tab.draw(c.d, x1 - tab.width(value), by, value_col, value, s);
+        by += lh;
+    };
+    for (int p = 0; p < fs::kParts; p++) line(part_col[p], names[p], fps_part_text[p], ink);
+    c.d->AddLine(ImVec2(x0, std::floor(by + 3 * s) + 0.5f), ImVec2(x1, std::floor(by + 3 * s) + 0.5f), ui::rgba(255, 255, 255, 40), std::max(1.0f, s));
+    by += 6 * s;
+    line(0, "GPU time", fps_gpu_text, ink);
+    const ImU32 red = ui::rgba(240, 100, 85);
+    line(0, "Shaders built (4 s)", fps_built_text, strcmp(fps_built_text, "0") ? red : dim);
+    line(0, "Draws left out (4 s)", fps_left_text, strcmp(fps_left_text, "0") ? red : dim);
 }
 
 /// The start-up screen: the logo, the wordmark, what the start is doing, a bar, on a warm dark. A little below the middle; what
@@ -2733,6 +3208,27 @@ void draw_startup(ui::Ctx& c) {
 
 void startup_fade_to(float f) { startup_fade.store(f, std::memory_order_relaxed); }
 
+// (hookshot, #1886) The Upscaler row's one-time questions: NVIDIA's NGX started (dlss_probe), AMD's FSR 4 loaded
+// (fsr4_probe), FSR 3.1's GPU check. They were asked at the menu's first open, on the frame's thread, and NGX's start
+// alone held that frame about 3 s (an RTX 5080 at 4K; 2.9 s here): the game stood still and its sound ran on, out of
+// step with a cutscene. Now asked once on a thread of their own while the start-up screen shows, where nobody waits on
+// them; each is locked and asked once (ngx_init, fsr4's load, fsr3::supported's static), so the menu's own calls at its
+// open return at once, or wait for the rest of the one under way.
+static void probe_upscalers_soon() {
+    static std::once_flag once;
+    std::call_once(once, [] {
+        if (!dev.device) return;
+        std::thread([] {
+            const auto t0 = std::chrono::steady_clock::now();
+            dlss_probe();
+            fsr4_probe();
+            (void)fsr3::supported();
+            logf("menu: the upscalers asked in the background while the start-up screen shows (%.0f ms)",
+                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+        }).detach();
+    });
+}
+
 void startup_screen(const StartupView* view) {
     if (!view) {
         startup_on.store(false, std::memory_order_release);
@@ -2746,6 +3242,19 @@ void startup_screen(const StartupView* view) {
         startup = v;
     }
     startup_on.store(true, std::memory_order_release);
+    probe_upscalers_soon();
+}
+
+static bool first_start = false;   // (menu_init: no options file yet. menu_first_start_for_gpu picks the preset for the card)
+void nr_environment(bool has_nr) {
+    if (!has_nr && getenv("RX_VK_DLSS_NR_DEFAULT")) env_override(&opts.dlss5, !env_value_off(getenv("RX_VK_DLSS_NR_DEFAULT")));
+    if (const char* e = getenv("RX_VK_DLSS_NR")) env_override(&opts.dlss5, !env_value_off(e));
+    if (const char* e = getenv("RX_VK_DLSS_NR_INTENSITY")) {
+        const float f = strtof(e, nullptr);
+        if (std::isfinite(f)) env_override(&opts.dlss5_intensity, (int)(std::clamp(f, 0.0f, 2.0f) * 100.0f + 0.5f));
+    }
+    if (!opts.dlss && env_on("RX_VK_DLSS_START")) env_override(&opts.dlss, 1);
+    nr_publish();
 }
 
 void menu_init() {
@@ -2754,6 +3263,8 @@ void menu_init() {
     done = true;
     for (auto& count : item_counts) count.store(-1, std::memory_order_relaxed);
     bool has_options = false, has_nr = false, has_nr_profile = false;
+    bool has_vram_budget = false;   // (hookshot: a file from before the VRAM budget row: its preset's, memory_budget's)
+    bool has_memory_budget = false;   // (a file from before memory_budget: its preset's)
     const char* cheats = getenv("HOS_OOT_CHEATS");
     cheats_env = cheats && !strcmp(cheats, "1");
     if (cheats_env) {
@@ -2767,6 +3278,7 @@ void menu_init() {
         bool v2 = false;
         int version = 0;
         int old_dynres = -1;   // (the row before Resolution: 0, the full scale, is its 100%; 1 is Auto)
+        bool menu_auto = false;   // (menu_size=0, the Menu size Auto there was before: Medium, not the Small the row's clamp gives)
         while (fgets(line, sizeof line, f)) {
             char* eq = strchr(line, '=');
             if (!eq) continue;
@@ -2787,6 +3299,9 @@ void menu_init() {
             v2 |= !strcmp(line, "options_version");
             if (!strcmp(line, "options_version")) version = atoi(eq + 1);
             if (!strcmp(line, "dynamic_resolution")) old_dynres = atoi(eq + 1);
+            if (!strcmp(line, "menu_size") && atoi(eq + 1) == 0) menu_auto = true;
+            if (!strcmp(line, "memory_budget")) opts.budget = std::min(std::max(atoi(eq + 1), 0), 5), has_memory_budget = true;
+            has_vram_budget |= !strcmp(line, "vram_budget");
             if (!strcmp(line, "microphone_device")) {   // (hookshot: the microphone, by its name)
                 mic_want = mic_key(eq + 1);
                 while (!mic_want.empty() && (mic_want.back() == '\n' || mic_want.back() == '\r')) mic_want.pop_back();
@@ -2801,6 +3316,7 @@ void menu_init() {
             mic_tell_host();
         }
         if (!has_resolution && old_dynres >= 0) opts.resolution = old_dynres ? 0 : 1;
+        if (menu_auto) opts.menu_size = 2;
         opts.rumble = rumble_step(opts.rumble);   // (a hand-edited 60: 50, on the arrows' steps)
         // (Game speed is Real time by default now: Per frame played at half speed at 30 fps, the "slow motion" players
         // reported. An options file from before kept the old default whether chosen or not: Real time for it too)
@@ -2809,37 +3325,73 @@ void menu_init() {
         // the off default it then was; fewer stutters and a better 1% low in the field, the flash checks clean, 2026-11-10)
         if (version < 4) opts.descriptor_reuse = 1;
     }
+    first_start = !has_options;
     // An opt-in profile for 4 GB cards: keep existing options authoritative, but make a first run usable on
     // low-VRAM hardware without requiring the menu to render first.
-    if (!has_options && getenv("RX_VK_LOW_SPEC") && atoi(getenv("RX_VK_LOW_SPEC")) != 0) {
+    if (!has_options && env_on("RX_VK_LOW_SPEC")) {
         apply_preset(1);
         opts.upscale = 0;
         opts.sharpness = 0;
     }
-    if (opts.preset > 0) sync_preset_budgets(opts.preset);
-    if (const char* e = getenv("RX_VK_FRAMEGEN_MULT")) opts.framegen = std::min(std::max(atoi(e), 2), 8);
-    if (const char* e = getenv("RX_VK_PACE")) opts.pace = atoi(e) != 0;
-    if (const char* e = getenv("RX_VK_UPSCALE"))
-        for (Row& r : rows)
-            if (r.value == &opts.upscale) *r.value = std::min(std::max(atoi(e), r.lo), r.hi);
-    if (const char* e = getenv("HOS_REALTIME_STEP")) opts.realtime = atoi(e) != 0;
-    if (const char* e = getenv("HOS_DYNRES")) opts.resolution = atoi(e) != 0 ? 0 : 1;
-    if (const char* e = getenv("HOS_OUTPUT_RES")) opts.output_res = parse_output(e);
-    if (!has_nr && getenv("RX_VK_DLSS_NR_DEFAULT")) opts.dlss5 = atoi(getenv("RX_VK_DLSS_NR_DEFAULT")) != 0;
-    if (const char* e = getenv("RX_VK_DLSS_NR")) opts.dlss5 = atoi(e) != 0;
-    if (const char* e = getenv("RX_VK_DLSS_NR_INTENSITY")) {
-        const float f = strtof(e, nullptr);
-        if (std::isfinite(f)) opts.dlss5_intensity = (int)(std::clamp(f, 0.0f, 2.0f) * 100.0f + 0.5f);
-    }
-    if (!opts.dlss && getenv("RX_VK_DLSS_START")) opts.dlss = 1;
+    if (opts.preset > 0 && !has_memory_budget) opts.budget = opts.preset;   // (a file from before memory_budget: its preset's)
+    if (!has_vram_budget) opts.vram_budget = preset_vram_budget(opts.budget);   // (a file from before the row)
+    vram_budget_sync();
     if (!has_nr_profile) opts.dlss5_profile = opts.dlss5 ? dlss_nr::identify(nr_model(), opts.dlss5_color) : dlss_nr::Original;
     if (has_nr_profile && opts.dlss5_profile == dlss_nr::Original) opts.dlss5 = 0;
     if (opts.dlss5_profile > dlss_nr::Original && opts.dlss5_profile < dlss_nr::Custom &&
         dlss_nr::identify(nr_model(), opts.dlss5_color) != opts.dlss5_profile) opts.dlss5_profile = dlss_nr::Custom;
-    nr_publish();
+    fps_cap_started = opts.fps_cap;   // (the FPS counter's graph: the cap applies from the start, host/nn_vi.c)
+    fps_level_now.store(fps_stats::level_of(opts.show_fps), std::memory_order_relaxed);
+    // (the environment over the saved rows, for this run only: env_override, save)
+    if (const char* e = getenv("RX_VK_FRAMEGEN_MULT")) env_override(&opts.framegen, std::min(std::max(atoi(e), 2), 8));
+    if (const char* e = getenv("RX_VK_PACE")) env_override(&opts.pace, !env_value_off(e));
+    if (const char* e = getenv("RX_VK_UPSCALE"))
+        for (Row& r : rows)
+            if (r.value == &opts.upscale) env_override(r.value, std::min(std::max(atoi(e), r.lo), r.hi));
+    if (const char* e = getenv("HOS_REALTIME_STEP")) env_override(&opts.realtime, !env_value_off(e));
+    if (const char* e = getenv("HOS_DYNRES")) env_override(&opts.resolution, env_value_off(e) ? 1 : 0);
+    // (vk_texture.cpp reads RX_VK_ASTC_RGBA8 over the row: the row shows it, fixed (row_fixed), and the ini keeps the player's)
+    if (const char* e = getenv("RX_VK_ASTC_RGBA8")) env_override(&opts.astc_rgba8, !env_value_off(e));
+    if (const char* e = getenv("HOS_OUTPUT_RES")) {
+        player_custom_output = custom_output;   // (parse_output replaces the player's own size with the environment's)
+        env_override(&opts.output_res, parse_output(e));
+    }
+    nr_environment(has_nr);
     restart_init();   // (what this run started with: the rows that take a restart differ from it once changed)
 }
 
+/// (hookshot) The first start (no options file yet), once the card is chosen: the Quality preset for its memory, so an older or
+/// smaller card does not start at the docked 2048 x 1152 with the full-size memory budget. A GTX 1050 (4 GB) lost the device at
+/// the first scene that way (Discord 2026-11-10); the Minimum preset's handheld picture and budget are what such cards run.
+/// An integrated GPU or a card of up to 4.5 GB: Minimum, with the plain scale (as RX_VK_LOW_SPEC=1); up to 6.5 GB: Low; larger:
+/// the defaults, as before. Docked either way (the handheld profile gave a GTX 1050 a black picture). Options already saved are never changed. RX_VK_AUTO_PRESET=0: off
+void menu_first_start_for_gpu(const VkPhysicalDeviceProperties& props, const VkPhysicalDeviceMemoryProperties& mem) {
+    if (!first_start) return;
+    first_start = false;
+    if (!env_int("RX_VK_AUTO_PRESET", 1)) return;
+    if (env_on("RX_VK_LOW_SPEC")) return;   // (chosen already, menu_init)
+    uint64_t vram = 0;
+    for (uint32_t i = 0; i < mem.memoryHeapCount; i++)
+        if (mem.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) vram = std::max<uint64_t>(vram, mem.memoryHeaps[i].size);
+    const bool integrated = props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU;
+    // (RX_VK_AUTO_PRESET_VRAM_MB=<n>: the card's memory taken as n MB, to try the choice on a larger card)
+    const uint64_t mb = getenv("RX_VK_AUTO_PRESET_VRAM_MB") ? (uint64_t)atoll(getenv("RX_VK_AUTO_PRESET_VRAM_MB")) : vram >> 20;
+    const int preset = integrated || mb <= 4608 ? 1 : mb <= 6656 ? 2 : 0;
+    if (!preset) return;
+    opts.preset = opts.budget = preset;
+    apply_preset(preset);
+    sync_preset_budgets(preset);
+    if (preset == 1) opts.upscale = 0, opts.sharpness = 0;
+    // (docked kept: the presets' handheld profile is what a player chooses; on the GTX 1050 above it gave a black picture.
+    // The Render resolution and the memory budget are what lighten the card)
+    opts.handheld = 0;
+    restart_init();   // (what this run starts with)
+    save();   // (host/nn_applet.c reads handheld_profile from the file when the game first asks its mode, after this)
+    logf("vk: first start on %s (%s, %llu MB of VRAM): the %s preset", props.deviceName, integrated ? "integrated" : "dedicated",
+         (unsigned long long)mb, tx_preset(preset));
+}
+
+int menu_vsync() { return env_on("RX_VK_FIFO") ? 1 : env_on("RX_VK_IMMEDIATE") ? 2 : opts.vsync; }
 bool resolution_auto() { return opts.resolution == 0; }
 int resolution_scale() {
     const float s = upscaler_rows::percent(opts.resolution) / 100.0f;
@@ -2860,7 +3412,8 @@ void menu_set_gpu_count(int count) {
 
 bool menu_is_open() { return open_now.load(std::memory_order_relaxed) || comparison_release.load(std::memory_order_relaxed); }
 bool menu_comparing() { return comparison_open.load(std::memory_order_relaxed); }
-bool menu_nr_editing() { return open_now.load(std::memory_order_relaxed) && cur_tab == TAB_DLSS5 && drag_row >= 0; }
+std::atomic<bool> nr_dragging{false};
+bool menu_nr_editing() { return nr_dragging.load(std::memory_order_relaxed); }
 // (the tools off on the Debug tab: flight, the free camera and heart protection put away; -1, heart protection never set, is the
 // host's own HOS_OOT_PROTECT_HEARTS)
 int menu_heart_protection() {
@@ -2869,6 +3422,7 @@ int menu_heart_protection() {
 }
 int menu_player_flight() { return cheats_on() ? player_flight.load(std::memory_order_relaxed) : -1; }
 int menu_free_camera() { return cheats_on() ? free_camera.load(std::memory_order_relaxed) : 0; }
+int menu_link_speed() { return cheats_on() ? link_speeds[std::clamp(link_speed.load(std::memory_order_relaxed), 0, kLinkSpeeds - 1)] : 100; }
 int menu_take_cheat_action() { return cheat_action.exchange(0, std::memory_order_relaxed); }
 
 void menu_note_present_sizes(uint32_t picture_w, uint32_t picture_h, uint32_t window_w, uint32_t window_h) {
@@ -2902,6 +3456,27 @@ void fullscreen_tick() {
     }
 }
 
+/// The FPS counter's lines past the number, four times a second: the game's frame time over the last half second and
+/// the 1% low over 10 s; the Breakdown's parts and the GPU's time over the half second, the shaders built and the draws left
+/// out over the graph's 4 s
+void fps_texts(int64_t now) {
+    namespace fs = fps_stats;
+    const int level = fs::level_of(opts.show_fps);
+    if (level < fs::kFrameTime) return;
+    const fs::Summary half = fps_summary(now, fs::kSecond / 2, fs::kLowWindow);
+    fs::frame_time_text(fps_ms_text, sizeof fps_ms_text, half.avg_ms);
+    fs::low_text(fps_low_text, sizeof fps_low_text, half.low_fps);
+    if (!half.frames) fps_ms_text[0] = 0;
+    fps_ms_now = half.avg_ms;
+    for (int p = 0; p < fs::kParts; p++) fps_parts_now[p] = half.part[p];
+    if (level < fs::kBreakdown) return;
+    for (int p = 0; p < fs::kParts; p++) fs::frame_time_text(fps_part_text[p], sizeof fps_part_text[p], half.part[p]);
+    fs::frame_time_text(fps_gpu_text, sizeof fps_gpu_text, half.gpu_ms);
+    const fs::Summary graph = fps_summary(now, fs::kGraphWindow, 0);
+    snprintf(fps_built_text, sizeof fps_built_text, "%d", graph.pipelines);
+    snprintf(fps_left_text, sizeof fps_left_text, "%d", graph.left_out);
+}
+
 /// A rate over the half-second that just ended. The first call only starts that interval: the frames since launch,
 /// divided by one second, were shown as the rate the moment the counter was turned on.
 bool fps_take(int64_t now, int64_t shown, int64_t game, int64_t* next, int64_t* last_shown, int64_t* last_game,
@@ -2919,6 +3494,10 @@ bool fps_take(int64_t now, int64_t shown, int64_t game, int64_t* next, int64_t* 
     return have;
 }
 
+// (hookshot) the rows' values and the options file, kept apart between menu_tick (the present's thread), menu_option_set
+// (the game's) and the control bridge's menu_setting and menu_setting_set (its own thread). Recursive: a setter reached from
+// inside menu_tick's frame on the same thread does not lock itself out
+std::recursive_mutex menu_mu;
 void menu_option_set(int id, int value) {
     if (id == OOT_CHEAT_AGE_ID) {   // (Link's age: the Switch age row shows it)
         if (link_age.exchange(value, std::memory_order_relaxed) != value && page == 0 && cur_tab == TAB_DEBUG) menu_refresh = true;
@@ -2937,8 +3516,67 @@ void menu_option_set(int id, int value) {
         return;
     }
     if (id != 7) return;
+    std::lock_guard lk(menu_mu);   // (the counts above are atomics: the game's thread waits for no menu frame for them)
     opts.mouse_sens = std::min(std::max(value, 10), 500);   // (the keys work while the menu is closed: it shows it when opened)
     save();
+}
+
+// ---- (hookshot) the control bridge's option_get and option_set (host/control.c, docs/control.md) ----
+// The settings rows (a value, not a heading or a debug tool, shown on this PC: row_shown), found by their key in
+// hookshot_options.ini (ini_key), which stays the same while rows come and go or are renamed. The bridge calls these from
+// its own thread: menu_mu keeps them apart from menu_tick (the present's thread) and from menu_option_set (the game's)
+bool bridge_row(int i) { return rows[i].value && !rows[i].heading && rows[i].cheat < 0 && row_shown(i); }
+void bridge_fill(int i, MkwVkSetting* out) {
+    static const char* const tabs[] = {"graphics", "audio", "gameplay", "controls", "debug", "motion", "dlss5", "controls"};
+    static_assert(sizeof tabs / sizeof tabs[0] == TAB_PAGE + 1, "a name for each MenuTab");
+    const Row& r = rows[i];
+    *out = MkwVkSetting{};
+    snprintf(out->key, sizeof out->key, "%s", ini_key(r));
+    snprintf(out->name, sizeof out->name, "%s", r.name);
+    snprintf(out->tab, sizeof out->tab, "%s", r.tab >= 0 && r.tab <= TAB_PAGE ? tabs[r.tab] : "");
+    out->value = *r.value, out->lo = r.lo, out->hi = r.hi, out->step = r.step;
+    out->restart = r.restart, out->fixed = row_fixed(r.value);
+    snprintf(out->text, sizeof out->text, "%s", r.text ? r.text(out->value) : "");
+}
+// (the Upscaler row's questions, asked before menu_mu is taken: row_shown and row_fixed ask upscalers_available(), which
+// waits for the start-up probe (NGX's start, ~3 s) while it runs. Under menu_mu that held menu_tick, and the present with
+// it; this way only the bridge's thread waits, and once answered the questions return at once)
+static void bridge_probe_first() { (void)upscalers_available(), (void)dlss_why(); }
+/// The index-th settings row (an enumeration, for listing them; the index is not a name: rows come and go). 0: past the last
+int menu_setting(int index, MkwVkSetting* out) {
+    bridge_probe_first();
+    std::lock_guard lk(menu_mu);
+    for (int i = 0, n = 0; i < kRows; i++)
+        if (bridge_row(i) && n++ == index) return bridge_fill(i, out), 1;
+    return 0;
+}
+/// The settings row whose ini key is key, set to value as the menu's Left and Right set it (set_row: cut to its range, the
+/// Quality preset made Custom unless the row is exempt, a restart noted, kept in the options file). The rows the arrows step
+/// through a list of their own (the Upscaler, Render resolution, the output resolution) are stepped towards value until they
+/// reach it or go no further. out: the row as it is now. 1 set, 0 no such row, -1 nothing to choose on this PC (row_fixed)
+int menu_setting_set(const char* key, int value, MkwVkSetting* out) {
+    bridge_probe_first();
+    std::lock_guard lk(menu_mu);
+    int i = 0;
+    while (i < kRows && !(bridge_row(i) && !strcmp(ini_key(rows[i]), key))) i++;
+    if (i == kRows) return 0;
+    Row& r = rows[i];
+    if (row_fixed(r.value)) return bridge_fill(i, out), -1;
+    const int want = std::min(std::max(value, r.lo), r.value == &opts.pad_layout ? std::min(r.hi, 2) : r.hi);   // (3: Custom, shown only)
+    if (r.value == &opts.dlss || r.value == &opts.resolution || r.value == &opts.output_res) {
+        const int dir = want >= *r.value ? 1 : -1;
+        for (int k = 0; k <= r.hi - r.lo + 1 && *r.value != want; k++) {
+            const int was = *r.value;
+            set_row(r, was + dir * r.step, dir, false);
+            if (*r.value == was || (dir > 0 ? *r.value > want : *r.value < want)) break;   // (no further, or past it)
+        }
+        save();
+    } else if (want != *r.value) {
+        set_row(r, want, want > *r.value ? 1 : -1);
+    }
+    menu_refresh = true;
+    bridge_fill(i, out);
+    return 1;
 }
 
 /// (hookshot) the mouse on the inventory: a section tab chooses it, a card the item (a click selects it, it does not edit),
@@ -2992,6 +3630,10 @@ void cheat_press(int i, const bool* press, bool& changed) {
         pouch_item = (pouch_item + kPouchItems + (press[4] ? 1 : -1)) % kPouchItems;
         changed = true;
     }
+    if (i == 11 && (press[3] || press[4])) {   // (Movement speed: stops at 1x and 3x)
+        link_speed.store(std::clamp(link_speed.load() + (press[4] ? 1 : -1), 0, kLinkSpeeds - 1));
+        changed = true;
+    }
     if (i == 6 && (press[3] || press[4])) {
         const int step = press[4] ? 1 : -1;
         pouch_delta = std::clamp(pouch_delta + step, -10, 10);
@@ -3022,6 +3664,7 @@ void cheat_press(int i, const bool* press, bool& changed) {
 }
 
 void menu_tick() {
+    std::lock_guard lk(menu_mu);   // (the control bridge's settings: menu_setting_set)
     fullscreen_tick();
     if (comparison_release.load()) {
         bool down = false;
@@ -3046,7 +3689,7 @@ void menu_tick() {
         const bool queued = host && host->take_key_press && host->take_key_press(keys[i]);
         // Read both keys even if one is disabled, so old presses cannot toggle the menu after a change.
         // (F1 always opens the menu; Menu shortcut's F1 only leaves Insert to an overlay)
-        const bool enabled = keys[i] != VK_INSERT || opts.menu_shortcut == 0;
+        const bool enabled = keys[i] != VK_INSERT || opts.menu_shortcut != 1;   // (Insert: all but F1 only)
         press[i] = enabled && (host && host->take_key_press ? mine && queued : down && !held[i]);
         held[i] = down;
         if (press[i]) pad_last = false;   // (the keys: their names in the prompts)
@@ -3059,7 +3702,7 @@ void menu_tick() {
     const uint32_t chord = 1u << HOS_PAD_BACK | 1u << HOS_PAD_START;
     const bool chord_now = (raw & chord) == chord && (pad_held & chord) != chord;
     pad_held = raw;
-    if (pad_press) pad_last = auto_pad = true;   // (a controller: its buttons in the prompts, and Menu size Auto's choice)
+    if (pad_press) pad_last = true;   // (a controller: its buttons in the prompts)
     {   // (RX_VK_UI_PROMPTS=pad or keys: the prompts for screenshots of test runs, which have no controller and no focus)
         static const char* force = getenv("RX_VK_UI_PROMPTS");
         if (force) pad_last = !strcmp(force, "pad");
@@ -3106,7 +3749,7 @@ void menu_tick() {
             for (int p = 0; p < 4; p++)
                 if (!strcmp(key, pads[p]) && open_now.load() && listening != 1) {
                     press[5] |= p == pad_back, press[7] |= p == pad_confirm;
-                    pad_last = auto_pad = true;
+                    pad_last = true;
                 }
             next = next[n] == ',' ? next + n + 1 : nullptr;
         }
@@ -3140,6 +3783,11 @@ void menu_tick() {
         restart_state.choose_later(now);
         open_now = false, page = 0, changed = true;
     };
+    // (Menu shortcut "Insert, F1 or Esc": Esc on a closed menu opens it, the keyboard's alone (the
+    // gamepad's back is Esc only while it is open, above). The press that opened it does not go back a page below. No
+    // control can be bound to Esc, so nothing in play changes; the window gives the captured mouse back on the close)
+    const bool esc_opens = opts.menu_shortcut == 2 && press[5] && !open_now.load();
+    if (esc_opens) press[5] = false;
     if ((press[0] || press[6]) && nr_comparison.active) {
         nr_compare_leave(false);
         changed = true;
@@ -3147,12 +3795,11 @@ void menu_tick() {
         later();
     } else if ((press[0] || press[6]) && open_now.load() && restart_ask()) {
         page = 5, ask_sel = 0, listening = 0, changed = true;
-    } else if (press[0] || press[6]) {
+    } else if (press[0] || press[6] || esc_opens) {
         open_now = !open_now.load(), changed = true;
         page = 0, listening = 0;
         // (the layout row shows the controls as they are: host/nn_hid.c keeps them, the ini's pad_ lines, and a saved
         // layout is not applied over them at start)
-        if (open_now.load()) auto_pad = pad_last;   // (Menu size Auto: by what opened the menu)
         if (open_now.load()) opts.pad_layout = detect_pad_layout();
         if (open_now.load()) dlss_probe(), fsr4_probe();   // (whether the Upscaler row can offer DLSS and FSR here: asked once)
         if (open_now.load()) refresh_mics();   // (the microphones as they are now)
@@ -3499,27 +4146,31 @@ void menu_tick() {
         }
         if (now_open != told && app_window()) {
             told = now_open;
-            PostMessageA(app_window(), WM_APP + 8, (WPARAM)now_open, 0);
+            PostMessageA(app_window(), WM_APP + 8, (WPARAM)now_open, (LPARAM)(now_open && esc_opens));
         }
     }
-    if (opts.show_fps || opts.dlss5_stats) {
+    nr_dragging.store(open_now.load() && cur_tab == TAB_DLSS5 && drag_row >= 0, std::memory_order_relaxed);
+    fps_level_now.store(fps_stats::level_of(opts.show_fps), std::memory_order_relaxed);   // (what vk_fps.cpp measures)
+    if (opts.show_fps) {
         static int64_t next = 0, last_game = 0, last_shown = 0;
         const int64_t now = prof_now();
         double shown = 0, game = 0;
         if (fps_take(now, shown_frames.load(), game_frames.load(), &next, &last_shown, &last_game, &shown, &game)) {
-            nr_present_fps = shown;
             snprintf(fps_text, sizeof fps_text, "%.0f", shown);
+            fps_rate_now = opts.framegen >= 1 ? game : shown;   // (the game's own against its cap, with frame generation too)
             if (opts.framegen >= 1) snprintf(fps_sub, sizeof fps_sub, "game %.0f", game);
             else fps_sub[0] = 0;
         }
+        static int64_t texts_next = 0;   // (the lines past the number: four times a second, each over the last half second)
+        if (now >= texts_next) texts_next = now + fps_stats::kSecond / 4, fps_texts(now);
     }
 }
 
 void menu_record(VkCommandBuffer cmd, uint32_t index, uint32_t w, uint32_t h) {
     const bool start = startup_on.load(std::memory_order_acquire);
     const bool open = open_now.load(std::memory_order_relaxed);
-    const bool fps = (opts.show_fps || (opts.dlss5_stats && (!open || nr_comparison.active))) && !start;
-    if (!start && !fps && !open && !opts.dlss5_stats) {   // (nothing shows: no ImGui frame, no render pass)
+    const bool fps = opts.show_fps && !start;
+    if (!start && !fps && !open) {   // (nothing shows: no ImGui frame, no render pass)
         // (but a new window size or Menu size since the last bake: one frame with nothing drawn that bakes the menu's glyphs
         // and measures its page for the new size, so the next open has no hitch whatever was resized while nothing showed)
         if (prebake_needed(w, h) && ui::begin(w, h)) {
@@ -3550,8 +4201,8 @@ void menu_record(VkCommandBuffer cmd, uint32_t index, uint32_t w, uint32_t h) {
 
 void menu_record_image(VkCommandBuffer cmd, VkImage image, VkImageView view, uint32_t w, uint32_t h) {
     const bool open = open_now.load(std::memory_order_relaxed);
-    const bool fps = (opts.show_fps || (opts.dlss5_stats && (!open || nr_comparison.active))) && !startup_on.load(std::memory_order_acquire);
-    if (!open && !fps && !opts.dlss5_stats) return;
+    const bool fps = opts.show_fps && !startup_on.load(std::memory_order_acquire);
+    if (!open && !fps) return;
     if (!ui::begin(w, h)) return;
     ui::Ctx c = ui_ctx(w, h);
     if (open) draw_menu(c);

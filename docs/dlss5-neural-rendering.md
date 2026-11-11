@@ -47,7 +47,10 @@ to General; a saved Quality selection remains Quality.
 | Color strength | Compute composition in linear SDR Rec.709: mix original/NR chromaticity at NR luminance, preserve input alpha; independent of global intensity |
 | Temporal history | Auto sends NR Reset while the SR input is jittered, and on cuts/resizes/reactivation; Disabled always sends Reset. SR retains its own jitter/history |
 | Debug view | Actual original, raw NR, absolute RGB difference x20, device depth or motion resources; diagnostic outputs bypass NR processing |
-| Statistics | Extends the existing top-right FPS counter with frametime, effective NR dimensions and nonblocking Vulkan GPU timestamps around NR evaluation; unavailable measurements are `n/a`. Uses one shared panel, also when the separate FPS option is off. |
+
+The upstream FPS counter is unchanged. The former NR Statistics option and its
+GPU timestamp collection have been removed; legacy `dlss5_stats` entries are
+ignored and retired on the next settings save without changing FPS preferences.
 
 Legacy defaults are retained: intensity 35%, structure/tone/skin 100%,
 preset 0, style 0, auto mask/UI correction on, color strength 100%.
@@ -125,8 +128,7 @@ the DLSS engine alone consumes its immutable NR controls snapshot.
 NR allocates at the maximum SR input size (`feature_rw/feature_rh`), with the
 actual frame dimensions in all color/depth/motion/output subrects. Dynamic
 resolution within that allocation no longer recreates the feature or images.
-Only the actual evaluated dimensions are reported by statistics. NR history is
-reset on a subrect size change; that reset does not erase SR history.
+NR history is reset on a subrect size change; that reset does not erase SR history.
 
 Both opaque NR CreateFeature/EvaluateFeature calls drain the upstream command
 recorder with `rec::boundary(rec::B_DIRECT)`. The recorder test recognizes the
