@@ -56,7 +56,7 @@ RX_VK_DLSS_NR_LINUX=1 ./hookshot
 
 Or set RX_VK_DLSS_NR_LINUX=1 in the existing launch environment, then restart.
 This setting is intentionally not an in-game promise of availability.
-Select NVIDIA DLSS/DLAA and open the Graphics > DLSS 5 submenu. It reports experimental
+Select NVIDIA DLSS/DLAA and open the Graphics > DLSS 5 Neural Rendering submenu. It reports experimental
 status, capability failure or effective evaluation. Retry refreshes cached
 capability checks; changing the driver/runtime or opt-in setting requires
 restart. A copied Windows DLL is not considered proof of Linux support.

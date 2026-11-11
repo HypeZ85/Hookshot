@@ -22,6 +22,8 @@ def main():
     p.add_argument('--cxx',default='g++')
     a=p.parse_args()
     menu=(ROOT/'gpu/vk/vk_menu.cpp').read_text(encoding='utf-8')
+    assert re.search(r'"DLSS model".*?hn_dlss_model, false, true\},\s*'
+                     r'\{TAB_GRAPHICS, "DLSS 5 Neural Rendering"', menu, re.S)
     options=block((ROOT/'gpu/vk/vk_menu.h').read_text(encoding='utf-8'),'struct Options {')+';'
     tabs=block(menu, "enum MenuTab {")+";"
     controls=block((ROOT/'gpu/vk/vk_dlss.h').read_text(encoding='utf-8'),'struct DlssNrControls {')+';'
@@ -146,7 +148,7 @@ int main() {
         nav_start=menu.index("        if (press[5] && pending) pending = nullptr, changed = true; // Cancel")
         nav_end=menu.index("        const int tab_count",nav_start)
         nav=menu[nav_start:nav_end]
-        entry=re.search(r'    \{TAB_GRAPHICS, "DLSS 5"[^\n]+',menu).group(0)
+        entry=re.search(r'    \{TAB_GRAPHICS, "DLSS 5 Neural Rendering"[^\n]+',menu).group(0)
         opening=re.search(r'        else if \(press\[7\] && is_nr_row\(r\)\)[^\n]+',menu).group(0).replace("else if", "if",1)
         visibility=r"""
 #include <algorithm>

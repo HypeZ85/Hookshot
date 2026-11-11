@@ -21,7 +21,7 @@ Native Linux support is capability-gated and experimental; see
 [the Linux notes](dlss5-linux.md).
 
 Missing/invalid DLLs, unsupported hardware and recoverable NGX failures are
-reported only inside the Graphics > DLSS 5 submenu, in both Base and Advanced. They do not
+reported only inside the Graphics > DLSS 5 Neural Rendering submenu, in both Base and Advanced. They do not
 open a startup popup or erase saved preferences. Retry detection refreshes
 the cached check; changing driver/runtime initialization may require restart.
 Native HDR is bypassed because this NR path consumes SDR scene resources;
@@ -29,7 +29,7 @@ SDR and the existing Expanded HDR presentation path remain available.
 
 ## Controls
 
-The Graphics > DLSS 5 submenu follows the existing ImGui menu drawing/input conventions.
+The Graphics > DLSS 5 Neural Rendering submenu follows the existing ImGui menu drawing/input conventions.
 Base exposes requested/effective enable state, intensity, visual profiles,
 Compare, shortcut mode, toolbar position and reset. Advanced has two groups:
 General (history, masks and diagnostics) and Quality (model and color controls).
@@ -121,7 +121,7 @@ forced process termination in a test harness.
 
 ## Maintainer review follow-up
 
-The NR page is now a Graphics submenu directly below Upscaler, using the same
+The NR page is now a Graphics submenu directly below DLSS model, using the same
 navigation mechanism as Controls > Motion. It is absent from the main tab strip
 and hidden in builds without NGX. General/Quality and Base/Advanced share the
 same settings. FSR engines use the upstream shared temporal chain without NR;

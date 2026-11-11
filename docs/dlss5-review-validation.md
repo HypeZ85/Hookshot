@@ -167,3 +167,58 @@ Final complete suite: **383 passed, 5 failed, 30 skipped** in 96 seconds. NR
 actions/menu, FPS ordering, compact tuning and recorder checks pass. Remaining
 failures are the three missing .NET SDK fixtures, Windows link privileges and
 the upstream VRAM-budget fixture unused-constant warning documented above.
+
+
+## Maintainer follow-up on 12 November 2026
+
+Merged 73 upstream commits through `fce53453a2fdd701bb466c4e2c0de839bd6f2042`,
+retaining the new Graphics sections, native HDR tone mapper, field-of-view
+control, secondary controller bindings and renderer API version 18. The
+Graphics entry and compact-page title now read DLSS 5 Neural Rendering. Its
+entry is immediately after DLSS model, within the upstream scaling section.
+
+The keyboard regression now ends the shortcut-routing extraction before the
+periodic NR probe, supplies the NR state/persistence stubs, and exercises F1
+cancelling Compare for both queued and polled input. Existing shortcut and
+saved-configuration assertions remain intact. The NR menu check verifies the
+new label and ordering; Graphics-section and affected menu tests pass.
+
+Windows NGX renderer link and no-SDK DLSS object compile passed. Linux and a
+new live NR GPU evaluation have not been verified for this merge. The menu
+conversion is prepared for contributor review in the running game, in
+accordance with their earlier request to approve official menu conversions
+before publication. No screenshots or generated previews were captured.
+
+
+The complete Windows suite finished with **433 passed, 9 failed, 34 skipped**
+(106 seconds, eight concurrent checks). Menu keys, NR, Graphics sections,
+audio/stick/framegen, recorder and FPS checks pass. Six failures require the
+missing .NET SDK (including new portable-builder checks); extraction-path
+fixtures require Windows link privileges. The remaining two are upstream's
+unused `kVramMinimumOnly` fixture constant under clang 23 / Werror and the new
+`HOS_FPS_LOG` set-means-on check in `host/oot_high_fps.c`, which also exists
+unchanged on upstream `fce53453`. Assertions were not weakened to hide them.
+
+The complete isolated Windows game build passed in 15:11, with 650 compilation
+units and zero compilation failures. The SDK-enabled build compiled and staged
+its own API-18 renderer (current upstream ignores the prebuilt override when
+building with NGX). Intermediate build outputs were cleaned by the builder.
+The normal-window live review starts with NGX initialized and NR preflight
+available. Shader preparation is in progress; this is not a fresh NR quality
+or physical-input validation claim. Publication remains held for the
+contributor's explicit approval after trying the game.
+
+
+## Publication after live approval
+
+The contributor approved the renamed/repositioned menu in the running game.
+Before publication, four more upstream commits through
+`9df055f23cd4604a6f520631a6dd4154a55a22b4` were integrated without conflicts.
+They change Reflex submit tagging, RADV fallback/optimization and the sound
+clock, and do not change the approved menu or renderer API. Final Windows
+NGX renderer link and no-SDK DLSS object compilation pass. The complete suite
+now reports **435 passed, 9 failed, 34 skipped** (105 seconds). All NR/menu,
+Graphics sections, recorder, FPS, Reflex and high-FPS checks pass. The nine
+failures retain the environmental/upstream causes listed above. The full-game
+build and live approval precede only these last four non-menu upstream commits;
+no fresh Linux or GPU-quality validation is claimed for this final merge.
