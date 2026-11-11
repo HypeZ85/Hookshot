@@ -70,20 +70,22 @@ presented as working settings.
 
 ## Compare
 
-Select Compare and press Right (or click). The full panel is replaced by a
+Select Compare and press the normal confirm button, Right, or click. The full panel is replaced by a
 small translucent top/bottom toolbar; the viewport and central scene remain
 unchanged. F8 toggles NR or temporarily shows the original while held,
 according to shortcut mode. The controller equivalent is displayed on the
 toolbar and avoids the currently bound confirm/back face buttons. The menu
 continues to consume input so comparison buttons do not also trigger game
-actions. Selecting Toolbar position in Base shows an inert placement preview.
+actions. Compare Toolbar position chooses the top or bottom edge; the toolbar
+is shown only while Compare is active. Retry detection and Reset NR settings
+also accept confirm, Right, or a mouse click.
 
 The toolbar has NR, intensity, profile, Save and Cancel. Both exit to the
 previous NR settings page; Save commits the comparison changes, Cancel restores
 the entry snapshot. Temporary shortcut presses do not write the config.
 Disabling NR skips its evaluation while retaining resources during Compare
 for a fast return. Outside Compare, two seconds Off release the model, images,
-queries and composition pipeline through deferred destruction. Re-enabling
+and composition pipeline through deferred destruction. Re-enabling
 resets the relevant histories once after NR actually evaluates successfully.
 Availability failure and Native HDR do not repeatedly reset SR.
 
@@ -179,3 +181,19 @@ On an RTX 5080 with runtime 310.9.16, one 640x360 feature evaluated
 outside the active output subrect and no NaN/Inf. The final full-size output
 matched the first bit for bit. This verifies the tested runtime's changing
 subrect handling, not every resolution, driver, or temporal image quality.
+
+## Environment overrides
+
+These optional overrides last for the current run; saves keep the player
+preferences rather than the override. None selects the upstream upscaler:
+choose DLSS or DLAA in Graphics first.
+
+| Variable | Behavior |
+| --- | --- |
+| `RX_VK_DLSS_NR` | Override the NR enable request (`0`/`off` disables, `1` enables); availability checks still apply. |
+| `RX_VK_DLSS_NR_DEFAULT` | Set the initial request only when no saved NR enable preference exists; an explicit `RX_VK_DLSS_NR` takes precedence. |
+| `RX_VK_DLSS_NR_INTENSITY` | Override intensity as a 0–2 multiplier (1 = 100%), clamped to that range; nonfinite input is ignored. |
+
+The unrelated `RX_VK_DLSS_START` helper has been removed. Periodic availability
+checks use a nonblocking lock and retain the last diagnostic while NR is busy;
+explicit Retry still performs a fresh check.

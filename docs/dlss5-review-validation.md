@@ -141,3 +141,29 @@ llvm-mingw clang 23 with `-Werror`; it reproduces identically from unmodified
 upstream `d8f4a173` sources. The other five failures have the causes listed
 above. No test assertions were weakened. The rebuilt renderer was staged in
 the isolated game folder; this last removal has not had another GPU play test.
+
+## Follow-up review and compact-menu merge
+
+Integrated main through `6c8c1bfb08f34a7f9742b768001480d9710664d2`, including
+its compact tuning bar, texture mip bias and recorder test fix. NR keeps a
+separate Compare toolbar and retains General/Quality selection in the shared
+row-value renderer. Full-menu navigation and the upstream compact-mode state
+are preserved; the placement option does not display or resize a toolbar.
+
+Compare, Retry detection and Reset NR settings accept normal confirm or Right
+as well as mouse input. Simultaneous confirm/Right executes once. The setting
+is named Compare Toolbar position. Merge-corrupted Inventory/Teleport UTF-8
+strings and the NGX path comment were restored from upstream. RX_VK_DLSS_START
+was removed and NR environment overrides documented. The periodic capability
+probe uses try_lock and returns the cached issue while NR is busy; explicit
+Retry still checks synchronously. The actions regression executes production
+branches and tests lock contention from another thread without a GPU.
+
+Windows NGX renderer linked and the no-SDK DLSS object compiled. The rebuilt
+renderer was staged in the isolated game directory while the game was closed.
+No fresh GPU play test, screenshot or Linux build was performed in this update.
+
+Final complete suite: **383 passed, 5 failed, 30 skipped** in 96 seconds. NR
+actions/menu, FPS ordering, compact tuning and recorder checks pass. Remaining
+failures are the three missing .NET SDK fixtures, Windows link privileges and
+the upstream VRAM-budget fixture unused-constant warning documented above.

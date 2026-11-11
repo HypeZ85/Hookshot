@@ -72,7 +72,7 @@ void load_line(const char* input) {
 """+block(menu[menu.index('void menu_init() {'):], 'for (Row& r : rows) {')+'\n}\n'
     save_rows=block(block(menu,"void save() {"),"for (const Row& r : rows) {")
     start=menu.index('dlss_nr::Comparison nr_comparison;')
-    end=menu.index('bool nr_toolbar_preview()',start)
+    end=menu.index('void nr_compare_enter()',start)
     fixture+=menu[start:end]
     fixture+=block(menu,'void nr_compare_enter() {')+'\n'+block(menu,'void nr_compare_leave(bool commit) {')+r"""
 void save() { ++saves; saved=opts; }
@@ -177,7 +177,7 @@ ENTRY
 IS_NR
 VISIBILITY
 int cur_tab=TAB_GRAPHICS,tab_selected[TAB_DLSS5+1]{};
-bool press[8]{},changed=false,tab_left=false,tab_right=false,open_now=true;
+bool press[8]{},changed=false,tab_left=false,tab_right=false,open_now=true,tune_mode=false;
 const Row* pending=nullptr;
 int page=0,ask_sel=0;
 bool restart_ask() { return false; }

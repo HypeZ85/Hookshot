@@ -451,7 +451,7 @@ fs::path env_path(const char* name) {
 std::string shown(const fs::path& p) { return p.native(); }
 /// A path for NGX, which takes wide strings. NGX's Linux library turns them back into bytes in the "C" locale
 /// (WStrToUTF8Str: newlocale(LC_ALL, "C") and wcsrtombs), which fails on any character past ASCII, and the path comes out
-/// empty. Before, each byte was also widened alone ("CafÃƒÂ©"). So a folder whose path is not all ASCII goes to NGX as
+/// empty. Before, each byte was also widened alone ("CafÃ©"). So a folder whose path is not all ASCII goes to NGX as
 /// /proc/self/fd/<n>, the folder opened and kept open for the process's life: an ASCII name for the same folder, nothing
 /// made on the disk. NGX writes its own files (the data path) and finds the runtime through it; the driver's part then
 /// loads the runtime by its real path (realpath), which has to be ASCII too: ngx_init says so when that is all there is.
@@ -955,7 +955,10 @@ const TemporalEngine kEngine{"NVIDIA DLSS", "DLSS", start, prepare, evaluate, re
 
 dlss_nr::Issue dlss_nr_check(bool refresh) {
     State& s = st();
-    std::lock_guard lk(s.mu);
+    std::unique_lock lk(s.mu, std::defer_lock);
+    // Periodic UI probes use the cached issue while the renderer rebuilds NR.
+    if (refresh) lk.lock();
+    else if (!lk.try_lock()) return dlss_nr_issue();
     if (s.nr_failed && !refresh) return dlss_nr_issue(); // Capability success does not erase an evaluation failure.
     const auto issue = nr_check_locked(refresh);
     if (issue == dlss_nr::Issue::none && refresh) s.nr_rejected = false;
