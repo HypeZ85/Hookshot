@@ -80,9 +80,23 @@ actions. Compare Toolbar position chooses the top or bottom edge; the toolbar
 is shown only while Compare is active. Retry detection and Reset NR settings
 also accept confirm, Right, or a mouse click.
 
-The toolbar has NR, intensity, profile, Save and Cancel. Both exit to the
+The toolbar has NR, intensity, profile, Advanced/Base, Save and Cancel. Advanced
+adds two compact rows at the same screen edge: a parameter carousel followed by
+its value or draggable slider. Up/Down moves between the toolbar, parameter and
+value rows. Left/Right browses parameters on the second row and adjusts values
+on the third. Dimmed neighboring names show that the parameter list scrolls;
+the mouse wheel over the name also browses it. Clicking either half of a discrete
+value decreases/increases it; percent sliders support click and drag. Both
+General and Quality settings remain accessible. Shortcut mode, Retry detection
+and Reset NR settings stay in the full menu only. Runtime availability locks
+are shared with the full menu.
+Switching back to Base retains the preview edits. No viewport resize is used.
+
+Save and Cancel both exit to the
 previous NR settings page; Save commits the comparison changes, Cancel restores
-the entry snapshot. Temporary shortcut presses do not write the config.
+the entry snapshot, including temporal history, shortcut mode and toolbar position.
+Debug views remain session-only and return to the entry view on exit. Temporary
+shortcut presses and advanced edits do not write the config before Save.
 Disabling NR skips its evaluation while retaining resources during Compare
 for a fast return. Outside Compare, two seconds Off release the model, images,
 and composition pipeline through deferred destruction. Re-enabling

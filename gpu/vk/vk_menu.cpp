@@ -2253,7 +2253,7 @@ std::atomic<bool> comparison_release{false};
 bool nr_script_f8 = false, nr_script_f8_press = false;
 struct NrSaved {
     dlss_nr::Look look;
-    int requested, profile, mode, debug;
+    int requested, profile, mode, debug, history, top;
 } nr_saved;
 int nr_persisted_value(const int* value) {
     if (!nr_comparison.active) return saved_value(const_cast<int*>(value));
@@ -2262,6 +2262,8 @@ int nr_persisted_value(const int* value) {
     if (value == &opts.dlss5_color) return nr_saved.look.color;
     if (value == &opts.dlss5_compare_mode) return nr_saved.mode;
     if (value == &opts.dlss5_debug) return nr_saved.debug;
+    if (value == &opts.dlss5_history) return nr_saved.history;
+    if (value == &opts.dlss5_compare_top) return nr_saved.top;
     if (value == &opts.dlss5_intensity) return nr_saved.look.model.intensity;
     if (value == &opts.dlss5_structure) return nr_saved.look.model.structure;
     if (value == &opts.dlss5_tone) return nr_saved.look.model.tone;
@@ -2273,20 +2275,28 @@ int nr_persisted_value(const int* value) {
     return saved_value(const_cast<int*>(value));
 }
 int nr_compare_selected = 0;
+bool nr_compare_advanced = false;
+int nr_compare_setting_index = 0;
+bool nr_compare_dragging = false;
+float nr_compare_slider_left = 0, nr_compare_slider_right = 0;
 void nr_compare_enter() {
     if (dlss_nr::blocking(dlss_nr_check())) { menu_refresh = true; return; }
-    nr_saved = {{nr_model(), opts.dlss5_color}, opts.dlss5, opts.dlss5_profile, opts.dlss5_compare_mode, opts.dlss5_debug};
+    nr_saved = {{nr_model(), opts.dlss5_color}, opts.dlss5, opts.dlss5_profile, opts.dlss5_compare_mode, opts.dlss5_debug, opts.dlss5_history, opts.dlss5_compare_top};
     nr_comparison.enter(opts.dlss5 != 0);
     if (host && host->take_key_press) host->take_key_press(VK_F8); // Discard a shortcut pressed before entering Compare.
     opts.dlss5_debug = 0;
     comparison_open = true;
     dlss_nr_compare(nr_comparison.override_for(false, false));
     nr_compare_selected = 0;
+    nr_compare_dragging = false;
+    nr_compare_advanced = false;
+    nr_compare_setting_index = 0;
     nr_publish();
     menu_refresh = true;
     logf("menu: NR comparison entered; saved request %d", opts.dlss5);
 }
 void nr_compare_leave(bool commit) {
+    nr_compare_dragging = false;
     if (commit) {
         opts.dlss5 = nr_comparison.on;
         if (!opts.dlss5) opts.dlss5_profile = dlss_nr::Original;
@@ -2294,8 +2304,11 @@ void nr_compare_leave(bool commit) {
     } else {
         nr_look(nr_saved.look);
         opts.dlss5 = nr_saved.requested, opts.dlss5_profile = nr_saved.profile;
+        opts.dlss5_history = nr_saved.history;
+        opts.dlss5_compare_top = nr_saved.top;
+        opts.dlss5_compare_mode = nr_saved.mode;
     }
-    opts.dlss5_compare_mode = nr_saved.mode, opts.dlss5_debug = nr_saved.debug;
+    opts.dlss5_debug = nr_saved.debug;
     nr_comparison.leave();
     comparison_open = false;
     comparison_release = true; // Do not leak the shortcut/confirm key into the game on the closing frame.
@@ -2306,6 +2319,41 @@ void nr_compare_leave(bool commit) {
     menu_refresh = true;
     if (commit) save(); // End the transaction before writing; Cancel never writes temporary values.
     logf("menu: NR comparison %s; returned to settings, request %d", commit ? "saved" : "cancelled", opts.dlss5);
+}
+
+// Enumerate the actual menu rows, independently of the selected General/Quality tab.
+// Compare exposes visual parameters only; runtime maintenance stays in the full menu.
+Row* nr_compare_setting(int index, int* count = nullptr) {
+    int n = 0;
+    Row* selected = nullptr;
+    for (Row& r : rows) {
+        if (r.tab != TAB_DLSS5 || !r.value || r.value == &opts.dlss5_compare_mode || r.value == &opts.dlss5_advanced || r.value == &opts.dlss5_group ||
+            !strcmp(r.name, "Compare")) continue;
+        if (n++ == index) selected = &r;
+    }
+    if (count) *count = n;
+    return selected;
+}
+void nr_compare_adjust(Row& r, int dir, int target = -999) {
+    if (!r.value) {
+        if (!strcmp(r.name, "Retry detection")) dlss_nr_retry();
+        else if (!strcmp(r.name, "Reset NR settings")) {
+            nr_look({});
+            opts.dlss5_profile = nr_comparison.on ? dlss_nr::Balanced : dlss_nr::Original;
+            opts.dlss5_history = opts.dlss5_debug = 0;
+        }
+    } else {
+        if (row_fixed(r.value)) return;
+        opts.dlss5 = nr_comparison.on;
+        int v = target == -999 ? *r.value + dir * r.step : target;
+        if (!nr_prepare_row(r, v, dir)) return;
+        if (stops_at_ends(r)) v = std::clamp(v, r.lo, r.hi);
+        else v = v > r.hi ? r.lo : v < r.lo ? r.hi : v;
+        *r.value = v;
+        nr_row_changed(r);
+        nr_comparison.on = opts.dlss5 != 0;
+    }
+    nr_publish(); // Preview only: the transaction is persisted by Save, never by a step.
 }
 
 int csel = 0, ccol = menu_hit::kCtlPrimary;   // the page's row (options, then bindings and reset) and binding column
@@ -2600,19 +2648,19 @@ int nr_shortcut_pad() {
     return HOS_PAD_WEST;
 }
 void draw_nr_compare(ui::Ctx& c) {
-    const float s = c.s, bw = std::min(980*s, c.w-2*c.safe), bh = 72*s;
+    const float s = c.s, bw = std::min(980*s, c.w-2*c.safe), bh = (nr_compare_advanced ? 148 : 72)*s;
     const float x = (c.w-bw)*0.5f, y = opts.dlss5_compare_top ? c.safe : c.h-c.safe-bh;
     const auto stats = dlss_nr_stats();
     const bool desired = nr_comparison.override_for(nr_comparison.was_held, opts.dlss5_compare_mode != 0)==1;
     const char* state = dlss_nr::blocking(dlss_nr_issue()) ? "NR unavailable" :
         stats.active != desired ? "NR applying..." : stats.active ? "NR ON" : "NR OFF";
     const std::string labels[] = {state, "Intensity "+std::to_string(opts.dlss5_intensity)+"%",
-        tx_nr_profile(opts.dlss5_profile), "Save", "Cancel"};
+        tx_nr_profile(opts.dlss5_profile), nr_compare_advanced ? "Base" : "Advanced", "Save", "Cancel"};
     c.d->AddRectFilled(ImVec2(x,y),ImVec2(x+bw,y+bh),ui::rgba(30,24,17,190),3*s);
     c.d->AddRect(ImVec2(x,y),ImVec2(x+bw,y+bh),ui::alpha(ui::kEdge,0.8f),3*s);
     hits.clear(x,y,x+bw,y+bh);
-    for (int i=0;i<5;++i) {
-        const ImVec2 a(x+bw*i/5+5*s,y+5*s), b(x+bw*(i+1)/5-5*s,y+39*s);
+    for (int i=0;i<6;++i) {
+        const ImVec2 a(x+bw*i/6+5*s,y+5*s), b(x+bw*(i+1)/6-5*s,y+39*s);
         const bool selected = nr_compare_selected==i;
         if (selected) ui::gold(c,a,b);
         else c.d->AddRectFilled(a,b,ui::alpha(ui::kCellName,0.5f));
@@ -2621,10 +2669,45 @@ void draw_nr_compare(ui::Ctx& c) {
         ui::text_mid_centre(c,c.f.strong,17*s,(a.x+b.x)*0.5f,(a.y+b.y)*0.5f,selected ? ui::kGoldInk : ui::kInk,label.c_str());
         hits.add(a.x,a.y,b.x,b.y,menu_hit::kNrButton,i,i==1||i==2 ? a.x : 0,i==1||i==2 ? b.x : 0);
     }
+    if (nr_compare_advanced) {
+        int count = 0;
+        const Row* r = nr_compare_setting(nr_compare_setting_index, &count);
+        if (r) {
+            const bool slider = stops_at_ends(*r);
+            const bool locked = row_fixed(r->value);
+            for (int row=0;row<2;++row) {
+                const ImVec2 a(x+5*s,y+(43+40*row)*s), b(x+bw-5*s,y+(77+40*row)*s);
+                const bool selected = nr_compare_selected == row+6;
+                if (selected) ui::gold(c,a,b);
+                else c.d->AddRectFilled(a,b,ui::alpha(ui::kCellName,0.5f));
+                std::string label;
+                if (!row) label = std::string(r->name)+"  "+std::to_string(nr_compare_setting_index+1)+"/"+std::to_string(count);
+                else label = std::string(r->text ? r->text(*r->value) : "")+(locked ? " (unavailable)" : "");
+                if (!row) {
+                    const Row* previous = nr_compare_setting((nr_compare_setting_index+count-1)%count);
+                    const Row* next = nr_compare_setting((nr_compare_setting_index+1)%count);
+                    const auto before = fit(c,c.f.body,12*s,bw*.22f,previous->name,false);
+                    const auto after = fit(c,c.f.body,12*s,bw*.22f,next->name,false);
+                    ui::text_mid_centre(c,c.f.body,12*s,x+bw*.13f,(a.y+b.y)*.5f,ui::kSoft,before.c_str());
+                    ui::text_mid_centre(c,c.f.body,12*s,x+bw*.87f,(a.y+b.y)*.5f,ui::kSoft,after.c_str());
+                }
+                nr_compare_slider_left = x+15*s;
+                nr_compare_slider_right = x+bw-15*s;
+                if (row && slider) {
+                    const float amount = std::clamp(float(*r->value-r->lo)/float(r->hi-r->lo),0.f,1.f);
+                    c.d->AddRectFilled(ImVec2(nr_compare_slider_left,b.y-6*s),ImVec2(nr_compare_slider_right,b.y-3*s),ui::kSoft);
+                    c.d->AddRectFilled(ImVec2(nr_compare_slider_left,b.y-6*s),ImVec2(nr_compare_slider_left+amount*(nr_compare_slider_right-nr_compare_slider_left),b.y-3*s),ui::kGoldHi);
+                }
+                const auto text = fit(c,c.f.strong,16*s,row ? bw-30*s : bw*.48f,label,false);
+                ui::text_mid_centre(c,c.f.strong,16*s,x+bw*.5f,(a.y+b.y)*.5f-(row && slider ? 3*s : 0),selected ? ui::kGoldInk : ui::kInk,text.c_str());
+                hits.add(a.x,a.y,b.x,b.y,menu_hit::kNrButton,row+6,a.x,b.x);
+            }
+        }
+    }
     const std::string hint = std::string("F8 / ")+pad_name(nr_shortcut_pad())+(opts.dlss5_compare_mode ? ": hold for original" : ": toggle NR")+
-        "  |  Arrows: choose/adjust  |  Enter: select  |  Esc: Cancel";
+        (nr_compare_advanced ? " | Up/Down: row | Left/Right: browse / adjust | Esc: Cancel" : " | Arrows: choose/adjust | Enter: select | Esc: Cancel");
     const std::string line=fit(c,c.f.body,13*s,bw-24*s,hint,false);
-    ui::text(c,c.f.body,13*s,ImVec2(x+12*s,y+48*s),ui::kSoft,line.c_str());
+    ui::text(c,c.f.body,13*s,ImVec2(x+12*s,y+bh-24*s),ui::kSoft,line.c_str());
 }
 /// (hookshot) The Debug tab's order: the tools' rows by their group (Row::cheat), Up and Down walking them so; Inventory item
 /// and Change quantity are not shown (the Inventory page edits every amount)
@@ -4568,9 +4651,18 @@ void menu_tick() {
             changed = true;
         }
         nr_script_f8_press = false;
-        if (press[3] || tab_left) nr_compare_selected = (nr_compare_selected+5-1)%5, changed = true;
-        if (press[4] || tab_right) nr_compare_selected = (nr_compare_selected+1)%5, changed = true;
-        int adjust = press[1] ? 1 : press[2] ? -1 : 0;
+        int adjust = 0;
+        if (nr_compare_advanced) {
+            if (press[1]) nr_compare_selected = nr_compare_selected < 6 ? 7 : nr_compare_selected == 7 ? 6 : 3, changed = true;
+            if (press[2]) nr_compare_selected = nr_compare_selected < 6 ? 6 : nr_compare_selected == 6 ? 7 : 3, changed = true;
+            const int horizontal = (press[4] || tab_right) ? 1 : (press[3] || tab_left) ? -1 : 0;
+            if (nr_compare_selected < 6 && horizontal) nr_compare_selected = (nr_compare_selected+horizontal+6)%6, changed = true;
+            else adjust = horizontal;
+        } else {
+            if (press[3] || tab_left) nr_compare_selected = (nr_compare_selected+5)%6, changed = true;
+            if (press[4] || tab_right) nr_compare_selected = (nr_compare_selected+1)%6, changed = true;
+            adjust = press[1] ? 1 : press[2] ? -1 : 0;
+        }
         bool activate = press[7];
         const auto compare_hit = hits.at((float)mx,(float)my);
         if (mouse && compare_hit.part == menu_hit::kNrButton) {
@@ -4580,6 +4672,23 @@ void menu_tick() {
             if (activate && compare_hit.side) adjust = compare_hit.side;
         }
         if (mouse && (ptr.pressed & HOS_MOUSE_RIGHT)) press[5] = true;
+        if (nr_compare_advanced && mouse && ptr.wheel && compare_hit.part == menu_hit::kNrButton && compare_hit.index == 6) {
+            int count = 0;
+            nr_compare_setting(0, &count);
+            if (count) nr_compare_setting_index = (nr_compare_setting_index+(ptr.wheel > 0 ? count-1 : 1))%count;
+            changed = true;
+        }
+        if (Row* r = nr_compare_setting(nr_compare_setting_index)) {
+            if (nr_compare_advanced && mouse && compare_hit.part == menu_hit::kNrButton && compare_hit.index == 7 &&
+                (ptr.pressed & HOS_MOUSE_LEFT) && stops_at_ends(*r)) nr_compare_dragging = true;
+            if (!(ptr.held & HOS_MOUSE_LEFT)) nr_compare_dragging = false;
+            if (nr_compare_dragging) {
+                const float fraction = std::clamp((float(mx)-nr_compare_slider_left)/std::max(1.f,nr_compare_slider_right-nr_compare_slider_left),0.f,1.f);
+                const int target = r->lo+int(fraction*(r->hi-r->lo)/r->step+.5f)*r->step;
+                nr_compare_adjust(*r, target >= *r->value ? 1 : -1, std::clamp(target,r->lo,r->hi));
+                activate = false; adjust = 0; changed = true;
+            }
+        }
         if (activate || adjust) {
             const int dir = adjust ? adjust : 1;
             switch (nr_compare_selected) {
@@ -4595,8 +4704,18 @@ void menu_tick() {
                 if (profile > dlss_nr::Original && profile < dlss_nr::Custom) nr_look(dlss_nr::look(profile));
                 break;
             }
-            case 3: if (activate) nr_compare_leave(true); break;
-            case 4: if (activate) nr_compare_leave(false); break;
+            case 3: if (activate) nr_compare_advanced = !nr_compare_advanced; break;
+            case 4: if (activate) nr_compare_leave(true); break;
+            case 5: if (activate) nr_compare_leave(false); break;
+            case 6: {
+                int count = 0;
+                nr_compare_setting(0, &count);
+                if (count) nr_compare_setting_index = (nr_compare_setting_index+(dir < 0 ? count-1 : 1))%count;
+                break;
+            }
+            case 7:
+                if (Row* r = nr_compare_setting(nr_compare_setting_index)) nr_compare_adjust(*r, dir);
+                break;
             }
             changed = true;
             nr_publish();
@@ -4911,7 +5030,7 @@ void menu_tick() {
             PostMessageA(app_window(), WM_APP + 8, (WPARAM)now_open, (LPARAM)(now_open && esc_opens));
         }
     }
-    nr_dragging.store(open_now.load() && cur_tab == TAB_DLSS5 && drag_row >= 0, std::memory_order_relaxed);
+    nr_dragging.store(nr_compare_dragging || (open_now.load() && cur_tab == TAB_DLSS5 && drag_row >= 0), std::memory_order_relaxed);
     fps_level_now.store(fps_stats::level_of(opts.show_fps), std::memory_order_relaxed);   // (what vk_fps.cpp measures)
     if (opts.show_fps) {
         static int64_t next = 0, last_game = 0, last_shown = 0;

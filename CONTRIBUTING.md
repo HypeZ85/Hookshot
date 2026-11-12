@@ -284,7 +284,9 @@ the development guide's [reference](docs/development.md#switches-for-testing-and
 5. Include screenshots when the change shows on screen: graphics, the menu, the start-up screen, an overlay, a
    message. Before and after for a fix, the new screen for a feature, and the sizes or settings it was checked at. A
    screenshot of the game is fine; the rule above is about game files, not pictures of the game.
-6. Run the relevant checks. CI must pass; a change that only works on your machine is not ready.
+6. Run the relevant checks. CI must pass; a change that only works on your machine is not ready. CI has no game, so
+   also run the change in the game and put what you measured in the description: before and after on the same
+   scene for a performance change, the bug gone for a fix. An untested change is opened as a draft.
 7. Rebase or merge `main` when it has moved, and resolve conflicts in your branch rather than in the review.
 8. Do not include build output, dumps, generated files or a `.gitignore` bypass. Check `git status`.
 

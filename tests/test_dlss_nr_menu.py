@@ -120,11 +120,16 @@ int main() {
     assert(nr_ini_key(&opts.rumble)==nullptr);
     nr_compare_enter();
     assert(nr_comparison.active && override_value==1 && opts.dlss5_debug==0);
+    const int old_history=opts.dlss5_history, old_top=opts.dlss5_compare_top;
+    opts.dlss5_history=1-old_history; opts.dlss5_compare_top=1-old_top;
+    assert(nr_persisted_value(&opts.dlss5_history)==old_history);
+    assert(nr_persisted_value(&opts.dlss5_compare_top)==old_top);
     opts.dlss5_intensity=80; opts.dlss5_color=0; nr_comparison.toggle();
     assert(nr_persisted_value(&opts.dlss5_intensity)==35);
     assert(nr_persisted_value(&opts.dlss5_color)==100);
     assert(nr_persisted_value(&opts.dlss5)==1);
     nr_compare_leave(false);
+    assert(opts.dlss5_history==old_history && opts.dlss5_compare_top==old_top);
     assert(!nr_comparison.active && open_now && cur_tab==TAB_DLSS5 && page==0);
     assert(opts.dlss5_intensity==35 && opts.dlss5_color==100 && opts.dlss5==1 && saves==0);
     assert(opts.dlss5_debug==4 && opts.dlss5_compare_mode==1 && override_value==-1);

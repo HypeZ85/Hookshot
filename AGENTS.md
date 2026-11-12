@@ -46,3 +46,16 @@ What to post, and what not:
 
 Pull requests: **open the description with why the PR is needed**, in one or two plain sentences, and **include
 screenshots when the change shows on screen** (CONTRIBUTING.md, *Commits and pull requests*).
+
+**A pull request is tested before it is opened, and its description carries the measurements.** Passing the checks
+is not enough on its own:
+
+- **Run the change in the game** and say where (the area, the GPU, the driver, the OS) and what you saw. If you
+  could not run it, say so, and open it as a draft until someone has.
+- **A performance change carries numbers from the same scene before and after**, on the same build otherwise: fps or
+  frame time, the log line it moves (a slow submit, a stall, a timing), memory where it is about memory. Several
+  runs or an in-session A/B, since a single run each way varies more than most changes gain.
+- **A fix shows the bug gone:** the log line, the screenshot or the steps that failed before and pass now.
+- **A new default** (a switch on for everyone, a preset, a limit) says which hardware it was measured on, and what it
+  costs where it was not.
+- Add a row to [tested configurations](docs/tested-configurations.md) for each run you measured.

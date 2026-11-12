@@ -255,3 +255,34 @@ new GPU play test or Linux build was performed. The earlier live menu approval
 and API-18 game build are historical evidence, not validation of this revision.
 The existing isolated game was left intact; an API-19 renderer should be used
 with an API-19 host build. No proprietary file or generated image is included.
+
+## Compact three-row comparison and merge through ba005ca4
+
+Merged the user-approved comparison experiment and five upstream commits through
+ba005ca4 without conflicts. Compare Advanced now separates the toolbar,
+parameter carousel and value/slider into three rows. Up/Down changes rows;
+Left/Right browses parameters or adjusts values. The carousel includes both
+General and Quality, omits shortcut mode and Retry/Reset actions, and supports
+mouse-wheel browsing and slider dragging. Save/Cancel retain transactional state.
+
+The user tested the three-row interface in the running API-19 Windows game and
+approved it. The complete game build succeeded before this final five-commit
+merge (3:57 total, 1:31 compilation); the final menu renderer was then built and
+loaded into that compatible host. No screenshots were captured by the agent.
+No performance improvement, temporal-quality result or additional controller/
+aspect-ratio coverage is claimed from that approval.
+
+After the merge, Windows NGX renderer linking passes. The complete Windows suite
+reports **463 passed, 3 failed, 34 skipped** in 114 seconds. All NR and affected
+menu checks pass, including carousel enumeration, exclusions, navigation,
+locking, bounds and Cancel restoration. The failures are Windows symlink
+privileges, the clang-23 unused-global warning in the background-input fixture,
+and the new upstream prompt-skip fixture attempting to write a manifest into a
+missing prompts directory. The latter fixture and prompt-assets implementation
+are identical to upstream ba005ca4; no tests were weakened. All six formerly
+SDK-blocked .NET fixtures now pass with SDK 8.0.428 installed.
+
+The final five upstream commits have compile/source-check coverage here; the
+V-Sync/Frame Generation fix has no new live GPU validation from this run.
+Linux validation and the earlier shutdown/TDR investigation remain limited as
+previously documented. No proprietary artifacts are included.
