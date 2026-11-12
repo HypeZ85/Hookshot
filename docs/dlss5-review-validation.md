@@ -307,3 +307,38 @@ Windows NGX renderer linking passes. Complete suite: **464 passed, 3 failed,
 failures. Final translation data refinements were followed by passing coverage
 and compiled runtime-lookup tests in every locale and a successful renderer
 rebuild. No GPU, Linux or all-locale visual layout verification is claimed.
+
+## Merge through 9b6072cd
+
+Integrated 60 upstream commits through
+9b6072cd4b373bdd9ff3a8e056b7dc2b7dc359a5. Resolved conflicts in the menu,
+translation tables, DLSS release path and audio/stick source-extraction fixtures.
+Kept upstream's dynamic output-resolution/aspect choices, their persistence and
+screen-follow behavior, and retirement of the Mesh shaders menu row. NR debug
+remains session-only; Compare keeps its state masking and release-input guard.
+Translation entries were merged by English key, preserving upstream removals and
+updates as well as all NR translations; tables remain sorted with exact counts.
+
+The combined DLSS path preserves the upstream refusal reset on release/retry.
+Evaluation recovery now uses a release helper while already owning State::mu;
+external release and retry acquire the mutex themselves. This prevents recursive
+acquisition of the non-recursive mutex after repeated SR evaluation failures.
+A CPU regression executes both release paths, deferred feature destruction and
+retry. The NR menu fixture also checks dynamic custom-output indices and saved
+player aspect/size values under process overrides. The README now lists the NR
+submenu as required by upstream's new menu-table coverage test.
+
+Windows Vulkan/NGX renderer linking passes. Final full suite:
+**498 passed, 1 failed, 36 skipped** in 120 seconds. All NR, translation, menu,
+output/aspect, recorder, DLSS and affected upstream checks pass. The remaining
+failure is nx2/test_nup_paths.py: this Windows process lacks symbolic-link
+creation privileges (WinError 1314). That fixture is unchanged from upstream.
+The former input-background and prompt-skip failures now pass with main's fixes.
+No assertions or compiler diagnostics were weakened.
+
+Upstream's renderer interface is now API 21. No complete API-21 game build or
+new GPU/Linux play test was performed for this merge. The existing isolated
+API-19 game and renderer were left intact; the newly linked renderer must be
+used with a matching host. Earlier API-19 live menu approval remains historical
+evidence. NR comparison layout and interaction were not redesigned by this merge.
+No screenshot or proprietary artifact was uploaded.

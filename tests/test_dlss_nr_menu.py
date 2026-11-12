@@ -64,8 +64,13 @@ dlss_nr::Issue dlss_nr_issue() { return dlss_nr::Issue::none; }
         fixture+=block(menu,marker)+'\n'
     fixture+=r"""
 struct Row { int* value; int lo, hi; };
-Row rows[] = {{&opts.dlss5_group, 0, 1}, {&opts.dlss5_intensity, 0, 200}, {&opts.dlss5_debug, 0, 5}, {&opts.game_lang, 0, 13}};
-const char* ini_key(const Row& r) { return r.value == &opts.game_lang ? "game_language" : nr_ini_key(r.value); }
+Row rows[] = {{&opts.dlss5_group, 0, 1}, {&opts.dlss5_intensity, 0, 200}, {&opts.dlss5_debug, 0, 5}, {&opts.game_lang, 0, 13},
+              {&opts.output_res, 0, 8}, {&opts.ultrawide, 0, 4}};
+const char* ini_key(const Row& r) {
+    if (r.value == &opts.output_res) return "output_res";
+    if (r.value == &opts.ultrawide) return "ultrawide";
+    return r.value == &opts.game_lang ? "game_language" : nr_ini_key(r.value);
+}
 int parse_output(const char* text) { return atoi(text); }
 """+block(menu, 'bool nr_prepare_row(')+r"""
 void load_line(const char* input) {
@@ -79,8 +84,12 @@ void load_line(const char* input) {
     fixture+=block(menu,'void nr_compare_enter() {')+'\n'+block(menu,'void nr_compare_leave(bool commit) {')+r"""
 void save() { ++saves; saved=opts; }
 struct Out { unsigned w, h; };
-Out player_custom_output{}; constexpr int kCustomOutput = 6;
-bool env_holds(const int*) { return false; }
+Out player_custom_output{};
+int custom_index() { return 7; } // Dynamic upstream list: the custom size is no longer always index 6.
+int aspect_started=1, ultrawide_read=1;
+bool aspect_follows_host(int value) { return value==aspect_started; }
+bool hold_output=false;
+bool env_holds(const int* value) { return hold_output && value==&opts.output_res; }
 Out output_at(int) { return {2048, 1152}; }
 void save_rows_to(FILE* f) {
 SAVE_ROWS
@@ -144,6 +153,14 @@ int main() {
     char persisted[512]{}; fread(persisted,1,sizeof persisted-1,ini); fclose(ini);
     assert(strstr(persisted,"dlss5_intensity=45") && !strstr(persisted,"dlss5_debug"));
     assert(!strstr(persisted,"game_language"));
+    assert(strstr(persisted,"output_res=2048x1152") && strstr(persisted,"ultrawide=1"));
+    // A process override must keep the player's saved custom size/aspect alongside NR preferences.
+    opts.output_res=custom_index(); player_custom_output={1600,1200}; hold_output=true;
+    opts.ultrawide=aspect_started; ultrawide_read=0;
+    ini=tmpfile(); assert(ini); save_rows_to(ini); rewind(ini);
+    memset(persisted,0,sizeof persisted); fread(persisted,1,sizeof persisted-1,ini); fclose(ini);
+    assert(strstr(persisted,"output_res=1600x1200") && strstr(persisted,"ultrawide=0"));
+    assert(strstr(persisted,"dlss5_intensity=45") && !strstr(persisted,"dlss5_debug"));
     std::puts("NR group migration, keys, temporary save masking, Cancel restore and Save commit: PASS");
 }
 """
