@@ -21,8 +21,8 @@ inline const char* profile_name(int p) {
     constexpr const char* names[] = {"Original", "Faithful", "Balanced", "Intense", "Custom"};
     return names[std::clamp(p, 0, 4)];
 }
-// 310.9.16 fixed-input GPU validation found a distinct preset 1; hints 2/3 matched default.
-// Retain legacy values on load, but only offer the two verified choices for new edits.
+// In 310.9.16, preset 1 selects the earlier model; 0 (default) and 2 select October
+// Model 2. Keep saved numeric values and the legacy hint, offering only the two models.
 inline int step_preset(int current) { return current == 1 ? 0 : 1; }
 // An ephemeral comparison never writes the persistent requested enable flag.
 struct Comparison {

@@ -12,6 +12,11 @@
 namespace mkwvk {
 
 struct TemporalEngine;
+struct TemporalFrame;
+struct TemporalImage;
+int dlss_nr_stage();
+void dlss_nr_idle();
+bool dlss_nr_chain(VkCommandBuffer, TemporalFrame&, bool after, bool native_hdr, TemporalImage&, bool& debug);
 
 /// Whether this build has DLSS in it (HOOKSHOT_NGX)
 bool dlss_built();
@@ -26,6 +31,7 @@ struct DlssNrControls {
     dlss_nr::Settings model;
     int color = 100, history = 0, debug = 0;
     bool native_hdr = false;
+    int stage = 0; // 0 before upscaler (legacy), 1 after.
 };
 void dlss_nr_publish(const DlssNrControls& controls); // Immutable per-frame snapshot, separate from persisted UI options.
 struct DlssNrStats {

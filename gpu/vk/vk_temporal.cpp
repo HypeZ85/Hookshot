@@ -767,6 +767,7 @@ void temporal_reset_failure() {
 }
 
 void temporal_idle() {
+    dlss_nr_idle();
     State& s = st();
     if (!s.holding.load(std::memory_order_relaxed)) return;
     std::lock_guard lk(s.mu);
@@ -1059,7 +1060,16 @@ bool temporal_upscale(VkCommandBuffer cmd, uint64_t key, bool known, Texture* in
         logf("vk: upscaler: the scene's camera: near %.3f, far %.1f, vertical field of view %.1f degrees", cam.near_z,
              cam.far_z, cam.fov_y * 57.29578f);
     }
-    if (!engine.e->evaluate(cmd, f)) {
+    static int previous_nr_stage=-1;
+    const int nr_stage=dlss_nr_stage();
+    f.nr_stage=nr_stage;
+    if (previous_nr_stage!=nr_stage) f.reset=true, previous_nr_stage=nr_stage;
+    TemporalImage nr_picture;
+    bool nr_debug=false;
+    const bool nr_pre = mode != 1 && mode != 2 && dlss_nr_chain(cmd,f,false,hdr,nr_picture,nr_debug);
+    const TemporalImage original_color=f.color;
+    if (nr_pre && !nr_debug) f.color=nr_picture;
+    if (!(nr_pre && nr_debug) && !engine.e->evaluate(cmd, f)) {
         if (engine.e->retry) {   // (hookshot: this frame only, TemporalEngine::retry; a new history next)
             s.last_frame = 0;
             return fail("its evaluation failed this frame");
@@ -1068,10 +1078,13 @@ bool temporal_upscale(VkCommandBuffer cmd, uint64_t key, bool known, Texture* in
         engine.failed = true;
         return false;   // (the network writes its output over whatever the evaluation did)
     }
+    f.color=original_color;
     full_barrier(cmd);
+    TemporalImage final_picture=f.output;
+    if (!(nr_pre && nr_debug) && dlss_nr_chain(cmd,f,true,hdr,nr_picture,nr_debug)) final_picture=nr_picture;
     {
         const int32_t opc[2] = {(int32_t)ow, (int32_t)oh};
-        const VkDescriptorImageInfo info[2] = {{native ? s.linear : s.point, s.output.view, VK_IMAGE_LAYOUT_GENERAL},
+        const VkDescriptorImageInfo info[2] = {{native ? s.linear : s.point, final_picture.view, VK_IMAGE_LAYOUT_GENERAL},
                                                {VK_NULL_HANDLE, out_view, VK_IMAGE_LAYOUT_GENERAL}};
         VkWriteDescriptorSet w[2]{{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}, {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}};
         w[0].dstBinding = 0, w[0].descriptorCount = 1, w[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;

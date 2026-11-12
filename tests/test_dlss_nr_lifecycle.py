@@ -32,7 +32,7 @@ std::atomic<int> g_nr_compare{-1};
 struct State {
     struct { bool requested = true, native_hdr = false; } nr_controls;
     bool nr_requested = true, nr_running = true, nr_failed = false, nr_rejected = false;
-    int nr_feature = 1;
+    int nr_feature = 1, nr_inputs = 0, nr_comp = 0;
     unsigned long long nr_frames = 60;
     Clock::time_point nr_off_since{}, nr_last_check{};
 } state;
@@ -45,7 +45,7 @@ dlss_nr::Issue issue = dlss_nr::Issue::none, supported = dlss_nr::Issue::none;
 auto dlss_nr_issue() { return issue; }
 void nr_issue_set(dlss_nr::Issue value) { issue = value; }
 auto nr_check_locked(bool) { ++checks; return supported; }
-void drop_nr() { ++drops; state.nr_feature = 0; state.nr_running = false; }
+void drop_nr() { ++drops; state.nr_feature = state.nr_inputs = state.nr_comp = 0; state.nr_running = false; }
 """ + policy + r"""
 bool step(int millis = 17) {
     now += std::chrono::milliseconds(millis);
@@ -76,6 +76,8 @@ int main() {
     assert(step()); assert(drops == 0);
     assert(!step(1900) && drops == 0);
     assert(!step(101) && drops == 1);
+    fresh(); state.nr_feature = 0; state.nr_inputs = 1; state.nr_controls.requested = false;
+    step(); step(2100); assert(drops == 1 && !state.nr_inputs); // Debug-only adapter resources also expire.
     fresh(); comparing = true; g_nr_compare = 0;
     assert(step());
     assert(!step(10000) && drops == 0);

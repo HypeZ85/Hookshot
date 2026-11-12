@@ -49,6 +49,7 @@
 #include "vk_reflex.h"
 #include "vk_antilag.h"
 #include "upscaler_rows.h"
+#include "auto_settings.h"
 #include "menu_restart.h"
 #include "dlss_nr_controls.h"
 #include "vk_menu_i18n.h"
@@ -106,7 +107,7 @@ const char* tx_nr(int v) {
     if (!v) return "Off (requested)";
     if (dlss_nr::blocking(dlss_nr_issue())) return "On (unavailable)";
     if (opts.dlss5_debug == 1 || opts.dlss5_debug >= 4) return "On (debug bypass)";
-    if (!(temporal_mode() == 1 || temporal_mode() == 2)) return "On (choose DLSS/DLAA)";
+    if (!(temporal_mode() >= 1 && temporal_mode() <= 5)) return "On (choose DLSS/DLAA/FSR)";
     switch (dlss_nr_status()) {
     case NR_ACTIVE:
 #if defined(__linux__) && !defined(_WIN32)
@@ -124,7 +125,7 @@ const char* tx_nr_style(int v) {
     return names[std::clamp(v, 0, 2)];
 }
 const char* tx_nr_preset(int v) {
-    static const char* names[] = {"Default", "Preset 1", "Legacy hint 2", "Legacy hint 3"};
+    static const char* names[] = {"Model 2 (default)", "Model 1", "Model 2 (default)", "Legacy hint 3"};
     return names[std::clamp(v, 0, 3)];
 }
 const char* tx_nr_strength(int v) {
@@ -134,14 +135,9 @@ const char* tx_nr_strength(int v) {
     return b;
 }
 
-const char* tx_nr_page(int v) { return v ? "ADVANCED" : "BASE"; }
-const char* tx_nr_group(int v) {
-    static const char* names[] = {"General", "Quality"};
-    return names[std::clamp(v, 0, 1)];
-}
 const char* tx_nr_profile(int v) { return dlss_nr::profile_name(v); }
+const char* tx_nr_stage(int v) { return v ? "After upscaler" : "Before upscaler"; }
 const char* tx_nr_history(int v) { return v ? "Disabled (reset each frame)" : "Auto"; }
-const char* tx_nr_mode(int v) { return v ? "F8: Hold" : "F8: Toggle"; }
 const char* tx_nr_position(int v) { return v ? "Top" : "Bottom"; }
 const char* tx_nr_debug(int v) {
     if ((v == 2 || v == 3) && (!opts.dlss5 || dlss_nr::blocking(dlss_nr_issue()))) return "Unavailable (original input)";
@@ -164,7 +160,7 @@ void nr_look(const dlss_nr::Look& look) {
     opts.dlss5_color = look.color;
 }
 void nr_publish() {
-    dlss_nr_publish({opts.dlss5 != 0, nr_model(), opts.dlss5_color, opts.dlss5_history, opts.dlss5_debug, opts.hdr == 2});
+    dlss_nr_publish({opts.dlss5 != 0, nr_model(), opts.dlss5_color, opts.dlss5_history, opts.dlss5_debug, opts.hdr == 2, opts.dlss5_stage});
 }
 
 struct Row {
@@ -183,7 +179,6 @@ struct Row {
                                   // tests/test_preset_exempt.py)
     signed char cheat = -1;   // (a debug tool, on the Debug tab with the tools on: its index in the cheat_ tables, -1 none)
     bool heading = false;     // (a section's title on its tab, not a row: the selection steps over it)
-    int nr_area = 0;
 };
 /// A row's hints from a table, the value lo first (nullptr: none for that value)
 const char* hint_in(const char* const* t, int n, int lo, int v, int variant) {
@@ -755,7 +750,7 @@ const char* hn_resolution(int v, int variant) {
 /// A row with nothing else to choose here: shown without its arrows, Left and Right leave it (and the saved value) alone
 bool row_fixed(const int* value) {
     return            (value == &opts.dlss5 && !opts.dlss5 && dlss_nr::blocking(dlss_nr_issue())) ||
-           (value == &opts.dlss5_debug && (opts.hdr == 2 || !(temporal_mode() == 1 || temporal_mode() == 2))) ||
+           (value == &opts.dlss5_debug && (opts.hdr == 2 || !(temporal_mode() >= 1 && temporal_mode() <= 5))) ||
            ((nr_control(value) || value == &opts.dlss5_color || value == &opts.dlss5_history || value == &opts.dlss5_profile) && dlss_nr::blocking(dlss_nr_issue())) ||
            (value == &opts.dlss && ur::upscaler_fixed(upscalers_available())) ||
            (value == &opts.resolution && ur::render_fixed(upscaler())) || (value == &opts.upscale && !filter_needed()) ||
@@ -917,8 +912,9 @@ const char* tx_robust(int v) {
     return (unsigned)v < 3 ? t[v] : t[0];
 }
 const char* tx_preset(int v) {
-    static const char* t[] = {"Custom", "Minimum (4GB)", "Low (6GB)", "Balanced (8GB)", "High (12GB)", "Ultra (16GB+)"};
-    return t[std::min(std::max(v, 0), 5)];
+    static const char* t[] = {"Custom", "Minimum (4GB)", "Low (6GB)", "Balanced (8GB)", "High (12GB)", "Ultra (16GB+)",
+                              "Auto (this PC)"};
+    return t[std::min(std::max(v, 0), 6)];
 }
 // (hookshot) The VRAM budget row's choices: the texture and mirror budgets in MB (0: Auto, the renderer's own rule). The presets'
 // budgets are among them (preset_vram_budget), so a preset sets the row, and the row can also be chosen on its own (null and
@@ -952,7 +948,21 @@ void sync_preset_budgets(int p) {
 // 3840 x 2160 window at that preset's picture, 2048 x 1152 or the handheld profile's 1536 x 864: same frame, mean |Laplacian|
 // of the window and of the picture, on the slider's steps)
 void env_release(const int* value);   // (below: a row the environment held, set by the menu from now on)
+// (hookshot) the Quality preset "Auto (this PC)", kAutoPreset: the profile menu_auto_for_gpu chose for this PC (auto_settings.h)
+::auto_settings::Choice auto_choice;   // (tier 0: no profile yet, before the card is known)
+uint64_t auto_for = 0;               // (the fingerprint of the hardware the options' Auto settings were chosen for: auto_for=)
+uint64_t auto_fp = 0;                // (this PC's, menu_auto_for_gpu)
+uint64_t auto_tuned = 0;             // (the fingerprint the measured tuning in play finished for: auto_tuned=)
+// (the Output resolution Auto set, by its size: auto_output=<w>x<h>. Another size there is the player's; 0 x 0: unknown. Not the
+// choice's number: the choices follow the screen's modes (#2566), and a new screen is when Auto chooses again)
+struct { uint32_t w = 0, h = 0; } auto_output;
+::auto_settings::Tuning auto_tuning;   // (the measured tuning in play, menu_auto_tune; its steps kept as auto_steps=)
+void apply_auto(bool keep_own);   // (below: the Auto preset's rows)
 void apply_preset(int p) {
+    if (p == kAutoPreset) {
+        apply_auto(false);   // (chosen on the row: all of its rows, as any preset)
+        return;
+    }
     // (the rows it sets are the preset's from now on, even at the value the environment forced: save writes them)
     if (p > 0)
         for (const int* v : {&opts.resolution, &opts.upscale, &opts.sharpness, &opts.pace, &opts.realtime, &opts.handheld})
@@ -987,13 +997,57 @@ void apply_preset(int p) {
     opts.budget = p;   // (Custom chosen on this row: no budget, as before)
     sync_preset_budgets(p);
 }
+/// keep_own (Auto choosing again for new hardware): the preset-exempt rows the player set under Auto stay theirs, the Output
+/// resolution (another than the one Auto set, auto_output) and the VRAM budget row (budget 0, set_row). Mesh shaders Auto never
+/// sets (RX_VK_MESH_SHADERS), and the fingerprint has the card's mesh shaders, not this run's mode
+void apply_auto(bool keep_own) {
+    const ::auto_settings::Choice& c = auto_choice;
+    if (c.tier < 1) return;
+    const Out set = output_at(opts.output_res);
+    const bool own_output = keep_own && auto_output.w && !(set.w == auto_output.w && set.h == auto_output.h);
+    const bool own_budget = keep_own && opts.preset == kAutoPreset && opts.budget == 0;
+    const int output = opts.output_res, vram_budget = opts.vram_budget;
+    env_release(&opts.dlss);
+    opts.dlss = c.upscaler;   // (before the tier's rows: apply_preset snaps its Render resolution to this upscaler)
+    apply_preset(c.tier);   // (the tier's scaling rows and memory budgets)
+    if (c.tier == 1) opts.upscale = 0, opts.sharpness = 0;   // (the plain scale, as RX_VK_LOW_SPEC: the lightest)
+    opts.handheld = 0;   // (docked: the handheld profile gave a GTX 1050 a black picture; the Render resolution lightens the card)
+    if (c.resolution) opts.resolution = ur::snap_render(c.upscaler, c.resolution);
+    if (own_output) {
+        opts.output_res = output;
+    } else {
+        env_release(&opts.output_res);
+        // (the size Auto chose, among the menu's choices: the screen's resolutions and the common ones; a size the menu does not
+        // offer is the game's own, never the player's custom size)
+        int at = 0;
+        const std::vector<Out>& offered = outputs();
+        for (int i = 1; c.output_w && i < (int)offered.size(); i++)
+            if ((int)offered[i].w == c.output_w && (int)offered[i].h == c.output_h) at = i;
+        if (c.output_w && !at)
+            logf("vk: Auto (this PC): the screen's %dx%d is not among the Output resolution's choices: 2048x1152", c.output_w, c.output_h);
+        opts.output_res = at;
+        const Out o = output_at(at);
+        auto_output.w = o.w, auto_output.h = o.h;
+    }
+    if (own_budget) {
+        opts.budget = 0;
+        opts.vram_budget = vram_budget;
+        vram_budget_sync();
+    }
+    auto_tuned = 0;   // (chosen again: measured again in play)
+    auto_tuning = {};
+    opts.preset = kAutoPreset;   // (apply_preset set the tier's number)
+    auto_for = auto_fp;          // (chosen for this PC, whether at a start or on the menu's row)
+}
 
 MENU_HINTS(hn_preset, 0, "Each row as you set it. Changing most rows yourself comes back to Custom; the VRAM budget row keeps its value.",
            "Resolution 50% (with DLSS its nearest mode), Lanczos, Sharpness 30%, the Handheld Profile.",
            "Resolution 75% (with DLSS its nearest mode), Lanczos, Sharpness 30%, the Handheld Profile.",
            "Resolution 100% (with DLSS its nearest mode), Catmull-Rom, Sharpness 30%.",
            "Resolution 100% (with DLSS its nearest mode), Lanczos, Sharpness 40%.",
-           "Resolution 100% (with DLSS its nearest mode), Lanczos, Sharpness 50%.")
+           "Resolution 100% (with DLSS its nearest mode), Lanczos, Sharpness 50%.",
+           "Chosen for this PC from its graphics card, video memory and screen, and chosen again when they change. The log's "
+           "\"Auto (this PC)\" line says why.")
 MENU_HINTS(hn_gpu, 0, "The best dedicated GPU.")
 /// Frame generation: how many frames are made for each of the game's
 const char* hn_framegen(int v, int variant) {
@@ -1186,7 +1240,7 @@ Row rows[] = {
     // Graphics, in sections: a heading row is a section's title (draw_options draws it, the selection steps over it). The
     // Quality preset first, as it sets rows in every section. (Reflex, Anti-Lag 2, the Upscaler and the DLSS model only where
     // they run here; HDR's paper white and peak brightness only with HDR on: row_shown)
-    {TAB_GRAPHICS, "Quality preset", &opts.preset, 0, 5, 1, tx_preset,
+    {TAB_GRAPHICS, "Quality preset", &opts.preset, 0, 6, 1, tx_preset,
      "Sets the scaling rows and memory limits for a GPU with that much memory. The Upscaler and Frame generation stay yours.",
      hn_preset},
     // (the picture's way, top to bottom: the output's size, what fills it from the 3D, the 3D's size, its sharpening; then
@@ -1206,7 +1260,7 @@ Row rows[] = {
      hn_upscaler},
     {TAB_GRAPHICS, "DLSS model", &opts.dlss_model, 0, ur::kModels - 1, 1, tx_dlss_model,
      "Which of NVIDIA's DLSS networks draws the picture.", hn_dlss_model, false, true},
-    {TAB_GRAPHICS, "DLSS 5 Neural Rendering", nullptr, 0, 0, 0, nullptr, "Experimental Neural Rendering controls and comparison. Requires DLSS or DLAA and a compatible user-supplied NR runtime."},
+    {TAB_GRAPHICS, "DLSS 5 Neural Rendering", nullptr, 0, 0, 0, nullptr, "Experimental Neural Rendering controls and comparison. Requires DLSS, DLAA or FSR and a compatible user-supplied NR runtime."},
     {TAB_GRAPHICS, "Render resolution", &opts.resolution, 0, ur::kValues - 1, 1, tx_resolution,
      "The share of the output the 3D is drawn at; the Upscaler fills in the rest.", hn_resolution},
     {TAB_GRAPHICS, "Sharpness", &opts.sharpness, 0, 100, 10, tx_percent,
@@ -1273,35 +1327,38 @@ Row rows[] = {
     // (no Mesh shaders row: changing it translated every shader again at the next start, for nothing a player gains. A launch
     // switch now, RX_VK_MESH_SHADERS: gpu/vk/mesh_mode.h)
 
-    // The same persistent state on both pages; grouping keeps the list short.
-    {TAB_DLSS5, "Controls", &opts.dlss5_advanced, 0, 1, 1, tx_nr_page, "Base: everyday controls. Advanced: General and Quality.", nullptr, false, true, -1, false, 0},
-    {TAB_DLSS5, "Group", &opts.dlss5_group, 0, 1, 1, tx_nr_group, "General: history, masks and diagnostics. Quality: model and color controls.", nullptr, false, true, -1, false, 2},
+    // The same persistent state in one list; headings use the standard menu layout/navigation.
+    {TAB_DLSS5, "Base Options", nullptr, 0, 0, 0, nullptr, nullptr, nullptr, false, true, -1, true},
 #if defined(__linux__) && !defined(_WIN32)
-    {TAB_DLSS5, "Neural Rendering", &opts.dlss5, 0, 1, 1, tx_nr, "Experimental native Linux NR. Opt in with RX_VK_DLSS_NR_LINUX=1. Needs DLSS/DLAA and native NGX NR capability; Windows DLLs do not work natively. Errors stay here.", nullptr, false, true, -1, false, 0},
+    {TAB_DLSS5, "Neural Rendering", &opts.dlss5, 0, 1, 1, tx_nr, "Experimental native Linux NR. Opt in with RX_VK_DLSS_NR_LINUX=1. Needs DLSS/DLAA/FSR and native NGX NR capability; Windows DLLs do not work natively. Errors stay here.", nullptr, false, true, -1, false},
 #else
-    {TAB_DLSS5, "Neural Rendering", &opts.dlss5, 0, 1, 1, tx_nr, "Saved request and actual runtime state. Needs DLSS/DLAA and your own ngx/nvngx_dlssnr.dll. Errors stay here.", nullptr, false, true, -1, false, 0},
+    {TAB_DLSS5, "Neural Rendering", &opts.dlss5, 0, 1, 1, tx_nr, "Saved request and actual runtime state. Needs DLSS/DLAA/FSR and your own ngx/nvngx_dlssnr.dll. Errors stay here.", nullptr, false, true, -1, false},
 #endif
-    {TAB_DLSS5, "Intensity", &opts.dlss5_intensity, 0, 200, 5, tx_nr_strength, "Native model strength. Original default: 35%. Model edits apply after slider release and a short pause.", nullptr, false, true, -1, false, 0},
-    {TAB_DLSS5, "Visual profile", &opts.dlss5_profile, 0, 4, 1, tx_nr_profile, "Original disables NR. Faithful preserves original chromaticity; Balanced keeps legacy defaults; Intense uses 100% intensity. Manual edits select Custom.", nullptr, false, true, -1, false, 1},
-    {TAB_DLSS5, "Compare", nullptr, 0, 0, 0, nullptr, "Select or Right opens the comparison toolbar. There, F8 or the controller face button shown on the toolbar compares NR. Save confirms; Cancel restores.", nullptr, false, true, -1, false, 1},
-    {TAB_DLSS5, "Compare shortcut", &opts.dlss5_compare_mode, 0, 1, 1, tx_nr_mode, "Only inside Compare: F8 or the controller face button shown on the toolbar. Toggle switches NR; Hold shows original while held. Open Compare with Right.", nullptr, false, true, -1, false, 1},
-    {TAB_DLSS5, "Compare Toolbar position", &opts.dlss5_compare_top, 0, 1, 1, tx_nr_position, "Choose the top or bottom edge for the toolbar shown only in Compare mode.", nullptr, false, true, -1, false, 1},
-    {TAB_DLSS5, "Temporal history", &opts.dlss5_history, 0, 1, 1, tx_nr_history, "Auto resets NR history while SR jitter is active: this runtime has no verified NR jitter metadata. Disabled always resets NR. SR keeps its own history.", nullptr, false, true, -1, false, 3},
-    {TAB_DLSS5, "Style", &opts.dlss5_style, 0, 2, 1, tx_nr_style, "Native profile 0/1/2. Names are community terminology, not official NVIDIA names.", nullptr, false, true, -1, false, 4},
-    {TAB_DLSS5, "Model preset", &opts.dlss5_preset, 0, 3, 1, tx_nr_preset, "Default and Preset 1 produced distinct GPU output. Hints 2/3 matched default in this runtime test; old saved hints are retained, not offered as new choices.", nullptr, false, true, -1, false, 4},
-    {TAB_DLSS5, "Local structure", &opts.dlss5_structure, 0, 200, 5, tx_nr_strength, "Native local structure strength; original default 100%.", nullptr, false, true, -1, false, 4},
-    {TAB_DLSS5, "Local tone", &opts.dlss5_tone, 0, 200, 5, tx_nr_strength, "Native local tone strength; original default 100%.", nullptr, false, true, -1, false, 4},
-    {TAB_DLSS5, "Skin structure", &opts.dlss5_skin, -5, 200, 5, tx_nr_strength, "Follow structure uses NGX's -1 sentinel; 0 to 200% controls skin independently.", nullptr, false, true, -1, false, 4},
-    {TAB_DLSS5, "Color strength", &opts.dlss5_color, 0, 100, 5, tx_nr_strength, "0% keeps original chromaticity at NR luminance; 100% keeps NR colors. Linear SDR composition, independent of native Intensity.", nullptr, false, true, -1, false, 4},
-    {TAB_DLSS5, "Auto skin mask", &opts.dlss5_mask, 0, 1, 1, tx_onoff, "Native automatic skin detection. Its internal mask is not exposed as a readable renderer buffer.", nullptr, false, true, -1, false, 3},
-    {TAB_DLSS5, "UI correction", &opts.dlss5_ui, 0, 1, 1, tx_onoff, "Native flag. Hookshot's HUD and menus are drawn after NR and already bypass it.", nullptr, false, true, -1, false, 3},
-    {TAB_DLSS5, "Debug view", &opts.dlss5_debug, 0, 5, 1, tx_nr_debug, "Session only; starts in Normal. Actual buffers. Difference: luma-weighted absolute linear RGB delta x20. Depth: device depth. Motion: R=X, G=Y, gray=zero, +/-16 pixels.", nullptr, false, true, -1, false, 3},
+    {TAB_DLSS5, "Visual profile", &opts.dlss5_profile, 0, 4, 1, tx_nr_profile, "Original disables NR. Faithful preserves original chromaticity; Balanced keeps legacy defaults; Intense uses 100% intensity. Manual edits select Custom.", nullptr, false, true, -1, false},
+    {TAB_DLSS5, "Style", &opts.dlss5_style, 0, 2, 1, tx_nr_style, "Native profile 0/1/2. Names are community terminology, not official NVIDIA names.", nullptr, false, true, -1, false},
+    {TAB_DLSS5, "Intensity", &opts.dlss5_intensity, 0, 200, 5, tx_nr_strength, "Native model strength. Original default: 35%. Model edits apply after slider release and a short pause.", nullptr, false, true, -1, false},
+    {TAB_DLSS5, "Advanced Options", nullptr, 0, 0, 0, nullptr, nullptr, nullptr, false, true, -1, true},
+    {TAB_DLSS5, "Model preset", &opts.dlss5_preset, 0, 3, 1, tx_nr_preset, "310.9.16: Model 2 is the faster October default; Model 1 is the earlier model. Appearance and quality depend on the scene. Other runtimes may choose a different default.", nullptr, false, true, -1, false},
+    {TAB_DLSS5, "Local structure", &opts.dlss5_structure, 0, 200, 5, tx_nr_strength, "Native local structure strength; original default 100%.", nullptr, false, true, -1, false},
+    {TAB_DLSS5, "Local tone", &opts.dlss5_tone, 0, 200, 5, tx_nr_strength, "Native local tone strength; original default 100%.", nullptr, false, true, -1, false},
+    {TAB_DLSS5, "Skin structure", &opts.dlss5_skin, -5, 200, 5, tx_nr_strength, "Follow structure uses NGX's -1 sentinel; 0 to 200% controls skin independently.", nullptr, false, true, -1, false},
+    {TAB_DLSS5, "Color strength", &opts.dlss5_color, 0, 100, 5, tx_nr_strength, "0% keeps original chromaticity at NR luminance; 100% keeps NR colors. Linear SDR composition, independent of native Intensity.", nullptr, false, true, -1, false},
+    {TAB_DLSS5, "Stage", &opts.dlss5_stage, 0, 1, 1, tx_nr_stage, "Before: process the render-size scene. After: process the upscaled scene before the HUD. Experimental; requires a temporal upscaler on NVIDIA.", nullptr, false, true, -1, false},
+    {TAB_DLSS5, "Masks", nullptr, 0, 0, 0, nullptr, nullptr, nullptr, false, true, -1, true},
+    {TAB_DLSS5, "Auto skin mask", &opts.dlss5_mask, 0, 1, 1, tx_onoff, "Native automatic skin detection. Its internal mask is not exposed as a readable renderer buffer.", nullptr, false, true, -1, false},
+    {TAB_DLSS5, "UI correction", &opts.dlss5_ui, 0, 1, 1, tx_onoff, "Native flag. Hookshot's HUD and menus are drawn after NR and already bypass it.", nullptr, false, true, -1, false},
+    {TAB_DLSS5, "Compare", nullptr, 0, 0, 0, nullptr, nullptr, nullptr, false, true, -1, true},
+    {TAB_DLSS5, "Compare", nullptr, 0, 0, 0, nullptr, "Select or Right opens the comparison toolbar. Use its NR control to compare. Save confirms; Cancel restores.", nullptr, false, true, -1, false},
+    {TAB_DLSS5, "Compare Toolbar position", &opts.dlss5_compare_top, 0, 1, 1, tx_nr_position, "Choose the top or bottom edge for the toolbar shown only in Compare mode.", nullptr, false, true, -1, false},
+    {TAB_DLSS5, "Diagnostics", nullptr, 0, 0, 0, nullptr, nullptr, nullptr, false, true, -1, true},
+    {TAB_DLSS5, "Temporal history", &opts.dlss5_history, 0, 1, 1, tx_nr_history, "Auto resets NR history while NR input jitter is active: this runtime has no verified NR jitter metadata. Disabled always resets NR. SR keeps its own history.", nullptr, false, true, -1, false},
+    {TAB_DLSS5, "Debug view", &opts.dlss5_debug, 0, 5, 1, tx_nr_debug, "Session only; starts in Normal. Actual buffers. Difference: luma-weighted absolute linear RGB delta x20. Depth: device depth. Motion: R=X, G=Y, gray=zero, +/-16 pixels.", nullptr, false, true, -1, false},
 #if defined(__linux__) && !defined(_WIN32)
-    {TAB_DLSS5, "Retry detection", nullptr, 0, 0, 0, nullptr, "Recheck native NGX capability. A changed driver/runtime or the Linux opt-in environment setting requires a restart.", nullptr, false, true, -1, false, 0},
+    {TAB_DLSS5, "Retry detection", nullptr, 0, 0, 0, nullptr, "Recheck native NGX capability. A changed driver/runtime or the Linux opt-in environment setting requires a restart.", nullptr, false, true, -1, false},
 #else
-    {TAB_DLSS5, "Retry detection", nullptr, 0, 0, 0, nullptr, "Recheck the local DLL and NGX capability. A previously failed DLL load or changed GPU driver may require a restart.", nullptr, false, true, -1, false, 0},
+    {TAB_DLSS5, "Retry detection", nullptr, 0, 0, 0, nullptr, "Recheck the local DLL and NGX capability. A previously failed DLL load or changed GPU driver may require a restart.", nullptr, false, true, -1, false},
 #endif
-    {TAB_DLSS5, "Reset NR settings", nullptr, 0, 0, 0, nullptr, "Restore original NR tuning, Normal debug view and Auto history without changing the saved enable request.", nullptr, false, true, -1, false, 0},
+    {TAB_DLSS5, "Reset NR settings", nullptr, 0, 0, 0, nullptr, "Restore original NR tuning, Normal debug view and Auto history without changing the saved enable request.", nullptr, false, true, -1, false},
     // Audio
     {TAB_AUDIO, "Volume", &opts.volume, 0, 100, 5, tx_percent,
      "How loud the game plays. The game's own sound settings and Windows' volume still apply.", nullptr, false, true},
@@ -1714,12 +1771,6 @@ int ask_sel = 0;   // (the restart question's choice: 0 Later, 1 Restart now)
 /// selection is a place on its tab (tab_selected), so a row hidden after the selected one leaves the selection where it is,
 /// and menu_tick brings back one past the end
 bool row_shown(int i) {
-    if (rows[i].tab == TAB_DLSS5) {
-        const int area = rows[i].nr_area;
-        if (area == 1 && opts.dlss5_advanced) return false;
-        if (area >= 2 && !opts.dlss5_advanced) return false;
-        if (area >= 3 && area != opts.dlss5_group + 3) return false;
-    }
     if (rows[i].tab == TAB_DLSS5 && !dlss_built()) return false;
     if (is_nr_row(rows[i]) && !dlss_built()) return false;
     const int* v = rows[i].value;
@@ -1823,13 +1874,11 @@ const char* nr_ini_key(const int* value) {
     if (value == &opts.dlss5_skin) return "dlss5_skin";
     if (value == &opts.dlss5_mask) return "dlss5_mask";
     if (value == &opts.dlss5_ui) return "dlss5_ui";
-    if (value == &opts.dlss5_advanced) return "dlss5_advanced";
-    if (value == &opts.dlss5_group) return "dlss5_group";
     if (value == &opts.dlss5_profile) return "dlss5_profile";
     if (value == &opts.dlss5_color) return "dlss5_color";
+    if (value == &opts.dlss5_stage) return "dlss5_stage";
     if (value == &opts.dlss5_history) return "dlss5_history";
     if (value == &opts.dlss5_debug) return "dlss5_debug";
-    if (value == &opts.dlss5_compare_mode) return "dlss5_compare_mode";
     if (value == &opts.dlss5_compare_top) return "dlss5_compare_top";
 
     return nullptr;
@@ -1955,9 +2004,10 @@ void save() {
             const char* eq = strchr(line, '=');
             if (!eq || eq == line) continue;
             const std::string key(line, (size_t)(eq - line));
-            // (memory_budget too: save() writes it, and the file's old line, kept after it, won at the next start)
-            // Retire the old NR overlay setting without changing FPS preferences.
-            bool mine = key == "dlss5_stats" || key == "microphone_device" || key == "options_version" || key == "memory_budget";
+            // Retire NR UI/overlay keys; preserve the upstream automatic-preset ownership rules.
+            bool mine = key == "dlss5_stats" || key == "dlss5_advanced" || key == "dlss5_group" || key == "dlss5_compare_mode" ||
+                        key == "microphone_device" || key == "options_version" || key == "memory_budget" || key == "auto_for" ||
+                        key == "auto_tuned" || key == "auto_output" || key == "auto_steps";
             // (and the Mesh shaders row's line, no longer read (gpu/vk/mesh_mode.h): dropped, not kept for nothing)
             mine |= key == "mesh_shaders";
             for (const Row& r : rows)
@@ -1985,6 +2035,12 @@ void save() {
         // (not a row: the budgets Custom keeps. 0 too: with a preset on, the VRAM budget row chosen by the player, which the next
         // start must not take back to the preset's)
         fprintf(f, "memory_budget=%d\n", opts.budget);
+        if (auto_for) fprintf(f, "auto_for=%016llx\n", (unsigned long long)auto_for);   // (the hardware Auto (this PC) chose for)
+        if (auto_tuned) fprintf(f, "auto_tuned=%016llx\n", (unsigned long long)auto_tuned);   // (and measured in play for)
+        if (auto_for && auto_output.w)   // (the Output resolution Auto set, by its size)
+            fprintf(f, "auto_output=%ux%u\n", (unsigned)auto_output.w, (unsigned)auto_output.h);
+        // (the tuning's steps so far and whether one went down: the no-seesaw rule and the two steps hold across restarts)
+        if (auto_for && auto_tuning.steps) fprintf(f, "auto_steps=%d,%d\n", auto_tuning.steps, auto_tuning.went_down ? 1 : 0);
         // (2: game_speed below 2 was only ever the old default, see menu_init; 3: the mouse's buttons are bindings, see
         // host/nn_hid.c binds_load; 4: Descriptor reuse on by default, see menu_init and vk_draw.cpp desc_slotgen_on; 5: the
         // Menu shortcut "Insert, F1 or Esc" by default, see menu_init; 6: the Aspect ratio's 16:9 from before moves on a
@@ -2399,7 +2455,6 @@ void share_pipeline_list() {
 /// (a slider's drag: saved once it is let go)
 void nr_compare_enter();
 bool nr_prepare_row(Row& r, int& v, int dir) {
-    if (r.value == &opts.dlss5_group) v = dir < 0 ? 0 : 1; // Two tabs: Left selects General, Right selects Quality.
     if (r.value == &opts.dlss5 && !opts.dlss5 && dlss_nr::blocking(dlss_nr_check(true))) { menu_refresh = true; return false; }
     if (r.value == &opts.dlss5_preset) v = dlss_nr::step_preset(*r.value);
     if (r.value == &opts.dlss5_debug && (v == 2 || v == 3) && (!opts.dlss5 || dlss_nr::blocking(dlss_nr_issue()))) v = dir > 0 ? 4 : 1;
@@ -2594,18 +2649,17 @@ int page = 0;          // 0 the options, 1 the controls, 3 the teleport list, 4 
 dlss_nr::Comparison nr_comparison;
 std::atomic<bool> comparison_open{false};
 std::atomic<bool> comparison_release{false};
-bool nr_script_f8 = false, nr_script_f8_press = false;
 struct NrSaved {
     dlss_nr::Look look;
-    int requested, profile, mode, debug, history, top;
+    int requested, profile, debug, history, top, stage;
 } nr_saved;
 int nr_persisted_value(const int* value) {
     if (!nr_comparison.active) return saved_value(const_cast<int*>(value));
     if (value == &opts.dlss5) return nr_saved.requested;
     if (value == &opts.dlss5_profile) return nr_saved.profile;
     if (value == &opts.dlss5_color) return nr_saved.look.color;
-    if (value == &opts.dlss5_compare_mode) return nr_saved.mode;
     if (value == &opts.dlss5_debug) return nr_saved.debug;
+    if (value == &opts.dlss5_stage) return nr_saved.stage;
     if (value == &opts.dlss5_history) return nr_saved.history;
     if (value == &opts.dlss5_compare_top) return nr_saved.top;
     if (value == &opts.dlss5_intensity) return nr_saved.look.model.intensity;
@@ -2625,9 +2679,8 @@ bool nr_compare_dragging = false;
 float nr_compare_slider_left = 0, nr_compare_slider_right = 0;
 void nr_compare_enter() {
     if (dlss_nr::blocking(dlss_nr_check())) { menu_refresh = true; return; }
-    nr_saved = {{nr_model(), opts.dlss5_color}, opts.dlss5, opts.dlss5_profile, opts.dlss5_compare_mode, opts.dlss5_debug, opts.dlss5_history, opts.dlss5_compare_top};
+    nr_saved = {{nr_model(), opts.dlss5_color}, opts.dlss5, opts.dlss5_profile, opts.dlss5_debug, opts.dlss5_history, opts.dlss5_compare_top, opts.dlss5_stage};
     nr_comparison.enter(opts.dlss5 != 0);
-    if (host && host->take_key_press) host->take_key_press(VK_F8); // Discard a shortcut pressed before entering Compare.
     opts.dlss5_debug = 0;
     comparison_open = true;
     dlss_nr_compare(nr_comparison.override_for(false, false));
@@ -2648,9 +2701,9 @@ void nr_compare_leave(bool commit) {
     } else {
         nr_look(nr_saved.look);
         opts.dlss5 = nr_saved.requested, opts.dlss5_profile = nr_saved.profile;
+        opts.dlss5_stage = nr_saved.stage;
         opts.dlss5_history = nr_saved.history;
         opts.dlss5_compare_top = nr_saved.top;
-        opts.dlss5_compare_mode = nr_saved.mode;
     }
     opts.dlss5_debug = nr_saved.debug;
     nr_comparison.leave();
@@ -2665,13 +2718,13 @@ void nr_compare_leave(bool commit) {
     logf("menu: NR comparison %s; returned to settings, request %d", commit ? "saved" : "cancelled", opts.dlss5);
 }
 
-// Enumerate the actual menu rows, independently of the selected General/Quality tab.
+// Enumerate editable NR settings in the same order as the sectioned menu.
 // Compare exposes visual parameters only; runtime maintenance stays in the full menu.
 Row* nr_compare_setting(int index, int* count = nullptr) {
     int n = 0;
     Row* selected = nullptr;
     for (Row& r : rows) {
-        if (r.tab != TAB_DLSS5 || !r.value || r.value == &opts.dlss5_compare_mode || r.value == &opts.dlss5_advanced || r.value == &opts.dlss5_group ||
+        if (r.tab != TAB_DLSS5 || !r.value || r.value == &opts.dlss5 ||
             !strcmp(r.name, "Compare")) continue;
         if (n++ == index) selected = &r;
     }
@@ -2987,16 +3040,11 @@ std::string restart_line(ui::Ctx& c, float px, float width) {
 }
 
 
-int nr_shortcut_pad() {
-    for (const int button : {HOS_PAD_WEST,HOS_PAD_NORTH,HOS_PAD_SOUTH,HOS_PAD_EAST})
-        if (button != pad_confirm && button != pad_back) return button;
-    return HOS_PAD_WEST;
-}
 void draw_nr_compare(ui::Ctx& c) {
     const float s = c.s, bw = std::min(980*s, c.w-2*c.safe), bh = (nr_compare_advanced ? 148 : 72)*s;
     const float x = (c.w-bw)*0.5f, y = opts.dlss5_compare_top ? c.safe : c.h-c.safe-bh;
     const auto stats = dlss_nr_stats();
-    const bool desired = nr_comparison.override_for(nr_comparison.was_held, opts.dlss5_compare_mode != 0)==1;
+    const bool desired = nr_comparison.on;
     const char* state = dlss_nr::blocking(dlss_nr_issue()) ? "NR unavailable" :
         stats.active != desired ? "NR applying..." : stats.active ? "NR ON" : "NR OFF";
     char strength[128];
@@ -3051,8 +3099,8 @@ void draw_nr_compare(ui::Ctx& c) {
             }
         }
     }
-    const std::string hint = std::string(i18n::tr("F8 / "))+pad_name(nr_shortcut_pad())+i18n::tr(opts.dlss5_compare_mode ? ": hold for original" : ": toggle NR")+
-        i18n::tr(nr_compare_advanced ? " | Up/Down: row | Left/Right: browse / adjust | Esc: Cancel" : " | Arrows: choose/adjust | Enter: select | Esc: Cancel");
+    std::string hint = i18n::tr(nr_compare_advanced ? " | Up/Down: row | Left/Right: browse / adjust | Esc: Cancel" : " | Arrows: choose/adjust | Enter: select | Esc: Cancel");
+    if (hint.rfind(" | ", 0) == 0) hint.erase(0, 3);
     const std::string line=fit(c,c.f.body,13*s,bw-24*s,hint,false);
     ui::text(c,c.f.body,13*s,ImVec2(x+12*s,y+bh-24*s),ui::kSoft,line.c_str());
 }
@@ -3296,7 +3344,7 @@ void row_value_cell(ui::Ctx& c, const Row& r, ImVec2 va, ImVec2 vb, bool selecte
         const float half = (vb.x - va.x) * 0.5f - 18 * s;
         if (is_slider(r)) {
             slider_cell(c, va, vb, r.text(*r.value), menu_hit::slider_permille(*r.value, r.lo, r.hi), selected, t0, t1);
-        } else if (r.value == &opts.dlss5_group || (r.hi - r.lo == r.step && !fixed && ui::size_of(c.f.strong, 18 * s, lo.c_str()).x <= half &&
+        } else if ((r.hi - r.lo == r.step && !fixed && ui::size_of(c.f.strong, 18 * s, lo.c_str()).x <= half &&
                    ui::size_of(c.f.strong, 18 * s, hi.c_str()).x <= half)) {
             halves_cell(c, va, vb, lo.c_str(), hi.c_str(), *r.value == r.hi, selected, fixed);
         } else {
@@ -4364,8 +4412,7 @@ void menu_init() {
                 const long long parsed = strtoll(eq + 1, &end, 10);
                 if (end == eq + 1) continue;
                 const int v = (int)std::clamp(parsed, (long long)INT_MIN, (long long)INT_MAX);
-                // Old Rendering/Masks/Diagnostics selections now all open General; Quality keeps index 1.
-                *r.value = r.value == &opts.dlss5_group ? (v == 1 ? 1 : 0) :
+                *r.value =
                            r.value == &opts.output_res ? parse_output(eq + 1) : std::min(std::max(v, r.lo), r.hi);
             }
             has_resolution |= !strcmp(line, "resolution");
@@ -4373,6 +4420,17 @@ void menu_init() {
             if (!strcmp(line, "options_version")) version = atoi(eq + 1);
             if (!strcmp(line, "dynamic_resolution")) old_dynres = atoi(eq + 1);
             if (!strcmp(line, "menu_size") && atoi(eq + 1) == 0) menu_auto = true;
+            if (!strcmp(line, "auto_for")) auto_for = strtoull(eq + 1, nullptr, 16);
+            if (!strcmp(line, "auto_tuned")) auto_tuned = strtoull(eq + 1, nullptr, 16);
+            if (!strcmp(line, "auto_output")) {   // (<w>x<h>; a number from before is unknown: 0 x 0)
+                unsigned w = 0, h = 0;
+                if (sscanf(eq + 1, "%ux%u", &w, &h) == 2) auto_output.w = w, auto_output.h = h;
+            }
+            if (!strcmp(line, "auto_steps")) {
+                int steps = 0, down = 0;
+                if (sscanf(eq + 1, "%d,%d", &steps, &down) == 2)
+                    auto_tuning.steps = std::max(steps, 0), auto_tuning.went_down = down != 0;
+            }
             if (!strcmp(line, "memory_budget")) opts.budget = std::min(std::max(atoi(eq + 1), 0), 5), has_memory_budget = true;
             has_vram_budget |= !strcmp(line, "vram_budget");
             if (!strcmp(line, "microphone_device")) {   // (hookshot: the microphone, by its name)
@@ -4420,6 +4478,7 @@ void menu_init() {
         opts.sharpness = 0;
     }
     if (opts.preset > 0 && !has_memory_budget) opts.budget = opts.preset;   // (a file from before memory_budget: its preset's)
+    if (opts.preset == kAutoPreset && !has_memory_budget) opts.budget = 0;   // (Auto: its tier's, menu_auto_for_gpu)
     if (!has_vram_budget) opts.vram_budget = preset_vram_budget(opts.budget);   // (a file from before the row)
     vram_budget_sync();
     if (!has_nr_profile) opts.dlss5_profile = opts.dlss5 ? dlss_nr::identify(nr_model(), opts.dlss5_color) : dlss_nr::Original;
@@ -4448,35 +4507,39 @@ void menu_init() {
     restart_init();   // (what this run started with: the rows that take a restart differ from it once changed)
 }
 
-/// (hookshot) The first start (no options file yet), once the card is chosen: the Quality preset for its memory, so an older or
-/// smaller card does not start at the docked 2048 x 1152 with the full-size memory budget. A GTX 1050 (4 GB) lost the device at
-/// the first scene that way (Discord 2026-11-10); the Minimum preset's handheld picture and budget are what such cards run.
-/// An integrated GPU or a card of up to 4.5 GB: Minimum, with the plain scale (as RX_VK_LOW_SPEC=1); up to 6.5 GB: Low; larger:
-/// the defaults, as before. Docked either way (the handheld profile gave a GTX 1050 a black picture). Options already saved are never changed. RX_VK_AUTO_PRESET=0: off
-void menu_first_start_for_gpu(const VkPhysicalDeviceProperties& props, const VkPhysicalDeviceMemoryProperties& mem) {
-    if (!first_start) return;
+/// (hookshot) The Quality preset "Auto (this PC)", once the card is chosen (vk_main.cpp pick_device): the profile auto_settings.h
+/// picks from the hardware. A first start (no options file yet) starts on it. With Auto on, the profile is applied when the
+/// hardware it was chosen for changes (another card, its memory, the screen's size, a build with or without DLSS or FSR 4):
+/// the fingerprint is kept in the options file (auto_for=). Changing a row yourself comes back to Custom, and then nothing here
+/// touches the settings; the rows no preset sets (the Output resolution, the VRAM budget) leave it on Auto, and
+/// what the player set on them is kept when Auto chooses again (apply_auto keep_own). Before Auto, a first start chose Minimum or Low by the card's memory alone: an older or smaller card no
+/// longer starts at the docked 2048 x 1152 with the full-size budget (a GTX 1050 lost the device at the first scene that way,
+/// Discord 2026-11-10). RX_VK_AUTO_PRESET=0: a first start keeps the defaults, as before Auto.
+/// RX_VK_AUTO_PRESET_VRAM_MB=<n>: the card's memory taken as n MB, to try the choice for a smaller or larger card
+void menu_auto_for_gpu(const VkPhysicalDeviceProperties& props, ::auto_settings::Hardware hw) {
+    const bool first = first_start;
     first_start = false;
-    if (!env_int("RX_VK_AUTO_PRESET", 1)) return;
-    if (env_on("RX_VK_LOW_SPEC")) return;   // (chosen already, menu_init)
-    uint64_t vram = 0;
-    for (uint32_t i = 0; i < mem.memoryHeapCount; i++)
-        if (mem.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) vram = std::max<uint64_t>(vram, mem.memoryHeaps[i].size);
-    const bool integrated = props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU;
-    // (RX_VK_AUTO_PRESET_VRAM_MB=<n>: the card's memory taken as n MB, to try the choice on a larger card)
-    const uint64_t mb = getenv("RX_VK_AUTO_PRESET_VRAM_MB") ? (uint64_t)atoll(getenv("RX_VK_AUTO_PRESET_VRAM_MB")) : vram >> 20;
-    const int preset = integrated || mb <= 4608 ? 1 : mb <= 6656 ? 2 : 0;
-    if (!preset) return;
-    opts.preset = opts.budget = preset;
-    apply_preset(preset);
-    sync_preset_budgets(preset);
-    if (preset == 1) opts.upscale = 0, opts.sharpness = 0;
-    // (docked kept: the presets' handheld profile is what a player chooses; on the GTX 1050 above it gave a black picture.
-    // The Render resolution and the memory budget are what lighten the card)
-    opts.handheld = 0;
-    restart_init();   // (what this run starts with)
-    save();   // (host/nn_applet.c reads handheld_profile from the file when the game first asks its mode, after this)
-    logf("vk: first start on %s (%s, %llu MB of VRAM): the %s preset", props.deviceName, integrated ? "integrated" : "dedicated",
-         (unsigned long long)mb, tx_preset(preset));
+    if (const char* e = getenv("RX_VK_AUTO_PRESET_VRAM_MB")) hw.vram_mb = (uint32_t)atoll(e);
+    auto_choice = ::auto_settings::choose(hw);
+    const uint64_t fp = auto_fp = ::auto_settings::fingerprint(hw, props.vendorID, props.deviceID);
+    if (first && (!env_int("RX_VK_AUTO_PRESET", 1) || env_on("RX_VK_LOW_SPEC"))) return;   // (off, or chosen already: menu_init)
+    char hw_line[200];
+    snprintf(hw_line, sizeof hw_line, "%s, %u MB of video memory, %s, screen %dx%d at %d Hz, %u MB of RAM, %d threads",
+             props.deviceName, (unsigned)hw.vram_mb, hw.integrated ? "integrated" : "dedicated", hw.screen_w, hw.screen_h,
+             hw.refresh_hz, (unsigned)hw.ram_mb, hw.threads);
+    if (first) opts.preset = kAutoPreset;
+    if (opts.preset != kAutoPreset) {
+        logf("vk: Auto (this PC) would be: %s (%s)", auto_choice.why, hw_line);   // (for a bug report: what Auto would choose)
+        return;
+    }
+    if (fp == auto_for) {
+        logf("vk: Auto (this PC): the settings chosen for this PC before (%s)", hw_line);
+        return;
+    }
+    apply_auto(!first);   // (the hardware changed: the Output resolution and VRAM budget the player set stay theirs)
+    restart_init();   // (what this run starts with: the Output resolution applies at the next start, unless this is the first)
+    save();   // (host/nn_applet.c reads handheld_profile and output_res from the file when the game first asks its mode, after this)
+    logf("vk: Auto (this PC): %s: %s (%s)", first ? "first start" : "the hardware changed", auto_choice.why, hw_line);
 }
 
 int menu_vsync() { return env_on("RX_VK_FIFO") ? 1 : env_on("RX_VK_IMMEDIATE") ? 2 : opts.vsync; }
@@ -4659,6 +4722,71 @@ bool walk_to(State state, At at, Step step, int limit) {
     }
     for (int k = 0; k < limit && state() != start; k++) step(1);   // (back where it was: an end-stopped row is at its first)
     return false;
+}
+
+/// (hookshot) The Quality preset Auto (this PC)'s measured tuning in play (auto_settings.h tune): each of the replay's 120-present
+/// windows (vk_replay.cpp), the Render resolution one step lighter while frames are missed with the GPU over 90% of the cap's
+/// frame time, or one heavier while the cap holds with the GPU under 50%, up to the best mode that still upscales (never
+/// native); at most two steps (kept across restarts, auto_steps=), then done for this PC (auto_tuned=). The CPU holding the
+/// frame rate ends it for this run only. Not with Frame generation on (the frames shown are not the game's) nor with another
+/// preset. RX_VK_AUTO_TUNE=0: off. Before the tuning, in play (the upscaler has run, NGX has answered): the Render resolution for
+/// the upscaler that runs, when it is not the one Auto chose (auto_settings.h resolution_for)
+void menu_auto_tune(double gpu_ms, double draws, double fps) {
+    static const bool on = env_int("RX_VK_AUTO_TUNE", 1) != 0;
+    ::auto_settings::Tuning& tuning = auto_tuning;
+    std::lock_guard lk(menu_mu);
+    if (opts.preset != kAutoPreset || !auto_for) return;
+    if (draws >= 150) {
+        const ::auto_settings::Choice& c = auto_choice;
+        const int u = upscaler(), v = opts.resolution;
+        const int to = ::auto_settings::resolution_for(c, ur::engine(u), v, c.resolution ? ur::snap_render(c.upscaler, c.resolution) : 0);
+        if (to && ur::snap_render(u, to) != v) {
+            opts.resolution = ur::snap_render(u, to);
+            env_release(&opts.resolution);
+            samplers_changed();
+            menu_refresh = true;
+            tuning.n = 0;   // (the windows gathered were at the other share)
+            static const char* const name[ur::kUpscalers] = {"the game's own", "DLSS", "DLAA", "FSR 3.1", "FSR 4", "FSR 4", "Off"};
+            logf("vk: Auto (this PC): %s runs, not the %s chosen: Render resolution %d%% -> %d%%",
+                 name[std::clamp(u, 0, ur::kUpscalers - 1)], name[std::clamp(c.upscaler, 0, ur::kUpscalers - 1)], ur::percent(v),
+                 ur::percent(opts.resolution));
+            save();
+            return;
+        }
+    }
+    if (!on || auto_tuned == auto_for || opts.framegen || tuning.done) return;
+    // (the frame time the game runs to: the cap it started with, HOS_FPS_MAX over it, or the display's refresh with V-Sync On;
+    // as the FPS counter's line. Uncapped without V-Sync: the display's refresh, else 60)
+    const double target = fps_target_ms();
+    const int refresh = (display_refresh_mhz() + 500) / 1000;
+    const float cap = target > 0 ? (float)(1000.0 / target) : refresh > 0 ? (float)refresh : 60.0f;
+    const int u = upscaler(), v = opts.resolution;
+    if (ur::full_scale(u) || v == 0) return;   // (Native, or Auto's dynamic share: no steps to measure along)
+    // (heavier: up to the best mode that still upscales, past what the profile chose; never native: auto_settings.h best_step)
+    const int ceiling = ::auto_settings::best_step(u);
+    const int lighter = ur::step(u, v, 1), heavier = ur::step(u, v, -1);
+    const bool can_lighter = lighter != 0 && ur::percent(lighter) < ur::percent(v);
+    const bool can_heavier = heavier != 0 && ur::percent(heavier) > ur::percent(v) && ur::percent(heavier) <= ur::percent(ceiling);
+    const auto verdict = ::auto_settings::tune(tuning, (float)gpu_ms, (float)draws, (float)fps, cap, can_lighter, can_heavier);
+    if (verdict == ::auto_settings::WAIT) return;
+    if (verdict == ::auto_settings::LIGHTER || verdict == ::auto_settings::HEAVIER) {
+        opts.resolution = verdict == ::auto_settings::LIGHTER ? lighter : heavier;
+        env_release(&opts.resolution);
+        samplers_changed();   // (the upscalers' texture LOD bias follows the 3D's share, as when the row is set)
+        menu_refresh = true;
+        logf("vk: Auto (this PC), measured in play: %.0f fps of %.0f, the GPU at %.1f ms a frame of %.1f: Render resolution %d%% -> "
+             "%d%%", tuning.fps_mid, cap, tuning.gpu_mid, 1000.0 / cap, ur::percent(v), ur::percent(opts.resolution));
+    } else if (verdict == ::auto_settings::CPU_BOUND) {
+        // (this run only: early in play pipelines may still be compiling and textures streaming in; the next start measures again)
+        logf("vk: Auto (this PC), measured in play: the CPU holds the frame rate (%.0f fps of %.0f, the GPU at %.1f ms a frame of "
+             "%.1f): Render resolution %d%% kept for this run", tuning.fps_mid, cap, tuning.gpu_mid, 1000.0 / cap, ur::percent(v));
+        return;
+    } else {
+        auto_tuned = auto_for;
+        logf("vk: Auto (this PC), measured in play: settled (%.0f fps of %.0f, the GPU at %.1f ms a frame of %.1f): Render resolution "
+             "%d%% kept", tuning.fps_mid, cap, tuning.gpu_mid, 1000.0 / cap, ur::percent(v));
+    }
+    save();   // (after a step too: its steps, auto_steps=, so a restart before the next verdict keeps the no-seesaw rule)
 }
 
 /// The settings row whose ini key is key, set to value as the menu's Left and Right set it (set_row: cut to its range, the
@@ -4872,10 +5000,10 @@ void menu_tick() {
     game_lang_tick();
     if (comparison_release.load()) {
         bool down = false;
-        const int release_keys[] = {VK_F8,VK_RETURN,VK_ESCAPE,VK_INSERT,VK_F1,VK_LEFT,VK_RIGHT,VK_UP,VK_DOWN,VK_TAB,'Q','E'};
+        const int release_keys[] = {VK_RETURN,VK_ESCAPE,VK_INSERT,VK_F1,VK_LEFT,VK_RIGHT,VK_UP,VK_DOWN,VK_TAB,'Q','E'};
         for (const int key : release_keys)
             down |= (GetAsyncKeyState(key) & 0x8000) != 0;
-        if (!down && !nr_script_f8) comparison_release = false;
+        if (!down) comparison_release = false;
     }
     outputs_follow_screen();
     enum { K_N = 17 };
@@ -4969,9 +5097,6 @@ void menu_tick() {
         char key[8];
         int n = 0;
         if (next && sscanf(next, "%lf:%7[A-Z]%n", &at, key, &n) == 2 && (prof_now() - start) / 1e9 >= at) {
-            if (!strcmp(key, "HOLD")) nr_script_f8 = true;
-            if (!strcmp(key, "RELEASE")) nr_script_f8 = false;
-            if (!strcmp(key, "COMPARE")) nr_script_f8_press = true;
             static const char* names[] = {"INS", "UP", "DOWN", "LEFT", "RIGHT", "ESC", "", "ENTER", "", "", "TABL", "TABR"};
             for (int i = 0; i < 12; i++) press[i] |= *names[i] && !strcmp(key, names[i]);
             static const char* pads[] = {"PADS", "PADE", "PADW", "PADN"};
@@ -5045,15 +5170,6 @@ void menu_tick() {
     }
     if (last_issue != dlss_nr_issue()) { last_issue = dlss_nr_issue(); changed = true; }
     if (nr_comparison.active) {
-        const bool held = nr_script_f8 || (mine && ((GetAsyncKeyState(VK_F8) & 0x8000) || (raw & (1u << nr_shortcut_pad()))));
-        const bool queued = mine && host && host->take_key_press && host->take_key_press(VK_F8);
-        const bool was_on = nr_comparison.on;
-        nr_comparison.shortcut(held, queued || nr_script_f8_press, opts.dlss5_compare_mode != 0);
-        if (was_on != nr_comparison.on) {
-            if (nr_comparison.on && opts.dlss5_profile == dlss_nr::Original) opts.dlss5_profile = dlss_nr::identify(nr_model(), opts.dlss5_color);
-            changed = true;
-        }
-        nr_script_f8_press = false;
         int adjust = 0;
         if (nr_compare_advanced) {
             if (press[1]) nr_compare_selected = nr_compare_selected < 6 ? 7 : nr_compare_selected == 7 ? 6 : 3, changed = true;
@@ -5124,7 +5240,7 @@ void menu_tick() {
             nr_publish();
         }
         if (press[5]) nr_compare_leave(false), changed = true;
-        if (nr_comparison.active) dlss_nr_compare(nr_comparison.override_for(held, opts.dlss5_compare_mode != 0));
+        if (nr_comparison.active) dlss_nr_compare(nr_comparison.override_for(false, false));
         static int64_t repaint = 0;
         if (prof_now() >= repaint) repaint = prof_now()+150000000LL, changed = true;
 
@@ -5320,9 +5436,6 @@ void menu_tick() {
                         hit.side != 0)
                         press[hit.side < 0 ? 3 : 4] = true;   // (a tool's choice: its halves as Left and Right)
                     else if (d.tab == TAB_DLSS5 && !strcmp(d.name, "Compare")) press[4] = true;
-                    else if (d.value == &opts.dlss5_group) {
-                        if (hit.side) press[hit.side < 0 ? 3 : 4] = true; // Click the named half, including when already selected.
-                    }
                     else if (!d.value) press[7] = true;   // (a page, a tool: as Enter)
                     else switch (menu_hit::row_click(true, d.hi - d.lo == d.step, hit.side, *d.value == d.hi)) {
                     case menu_hit::kClickConfirm: press[7] = true; break;

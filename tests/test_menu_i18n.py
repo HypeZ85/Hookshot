@@ -55,15 +55,14 @@ class MenuI18nTests(unittest.TestCase):
         for name in ("dlss_nr_controls.h", "dlss_nr_support.h"):
             text = (VK / name).read_text(encoding="utf-8")
             if name == "dlss_nr_controls.h":
-                text = text[text.index("inline const char* profile_name"):text.index("// 310.9.16")]
+                text = text[text.index("inline const char* profile_name"):text.index("// In 310.9.16")]
             required.update(c_strings(text))
         required.discard("")
         required.update(("DLSS 5 Neural Rendering", "NR unavailable", "NR applying...", "NR ON", "NR OFF",
-                         "Intensity %d%%", "Advanced", "Base", "Save", "Cancel", " (unavailable)", "F8 / ",
-                         ": hold for original", ": toggle NR",
+                         "Intensity %d%%", "Advanced", "Base", "Save", "Cancel", " (unavailable)", "Base Options", "Advanced Options", "Masks", "Compare", "Diagnostics",
                          " | Up/Down: row | Left/Right: browse / adjust | Esc: Cancel",
                          " | Arrows: choose/adjust | Enter: select | Esc: Cancel",
-                         "Experimental Neural Rendering controls and comparison. Requires DLSS or DLAA and a compatible user-supplied NR runtime."))
+                         "Experimental Neural Rendering controls and comparison. Requires DLSS, DLAA or FSR and a compatible user-supplied NR runtime."))
         for table, pairs in self.tables.items():
             self.assertFalse(required - dict(pairs).keys(), "%s: untranslated NR text: %s" % (table, required - dict(pairs).keys()))
             for en, text in pairs:

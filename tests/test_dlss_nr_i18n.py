@@ -64,7 +64,7 @@ int main() {
         }
         const std::string composed=tr_text("Local structure")+"  3/14";
         assert(composed.find("3/14")!=std::string::npos);
-        assert(tr_text("F8 / ").back()==' ');
+        assert(!tr_text("Base Options").empty() && !tr_text("Advanced Options").empty());
         assert(tr_text(" (unavailable)").front()==' ');
     }
 }

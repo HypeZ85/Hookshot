@@ -342,3 +342,65 @@ API-19 game and renderer were left intact; the newly linked renderer must be
 used with a matching host. Earlier API-19 live menu approval remains historical
 evidence. NR comparison layout and interaction were not redesigned by this merge.
 No screenshot or proprietary artifact was uploaded.
+
+
+## Sectioned NR menu and shortcut removal (2026-11-12)
+
+The experimental branch now uses a single page with the upstream menu's heading
+rows: Base Options, Advanced Options, Masks, Compare and Diagnostics. Base orders
+Visual profile before Style. All rendering parameters remain available, and the
+Compare carousel follows the same order. The previous page/group selectors and
+the F8/controller dedicated shortcut preference have been retired. Comparison
+uses the toolbar NR control; Save/Cancel still commit/restore the transaction.
+Old selector/shortcut keys are ignored without changing NR tuning preferences.
+The historical General/Quality and shortcut descriptions above describe earlier
+revisions, not the current menu.
+
+All 13 non-English locales include the new headings and revised Compare help;
+retired text has been removed. Regression checks assert section/setting order,
+one-page visibility, absence of F8 capture, obsolete-key compatibility, and the
+existing Compare/navigation/persistence behavior. Twelve targeted checks passed;
+the complete Windows suite had 499 passed, 36 skipped and the unchanged
+`nx2/test_nup_paths.py` failure caused by WinError 1314 (symlink privilege).
+The Windows NGX renderer compiled successfully and was copied to the matching
+API-21 isolated game folder while the game was closed. No screenshots, automated
+game input or new visual/controller/Linux validation were performed. This change
+has not been published to the existing PR.
+
+
+## Model names, current main and Windows CI follow-up (2026-11-12)
+
+Merged main through `4dd972a85ed5291ba7747ead68fbc38cdd69ec8e` (six commits),
+including Auto (this PC), device-fault diagnostics and background gyro handling.
+The save conflict preserves ownership of upstream auto-preset keys and retires
+obsolete NR page/group/shortcut keys; the frame-generation fixture keeps both
+upstream Auto and NR stand-ins. Existing assertions remain intact.
+
+For NR 310.9.16, preset 0 (runtime default) and explicit preset 2 are displayed
+as Model 2 (default), while preset 1 is Model 1. Preserved numeric values avoid
+changing saved model selection. The October model is faster/smaller according
+to NVIDIA; neither a universal quality deficit nor a Hookshot speedup is claimed.
+The contract document links the NVIDIA announcement and the original runtime
+verification report. New labels/help are translated in all 13 non-English
+locales. The Compare carousel omits Neural Rendering, using its toolbar toggle.
+
+The failed [Windows part 2 job](https://github.com/NotRexed/Hookshot/actions/runs/43286938930/job/131430377042?pr=1590)
+failed compiling `tests/test_dlss_nr_menu.py`: MSVC CRT deprecates `tmpfile()` and
+`-Werror` promotes that diagnostic to an error. The fixture now uses `tmpfile_s`
+with the MSVC CRT and the portable stdio API elsewhere. No compiler warning or
+assertion was disabled. The complete menu fixture passes locally with clang's
+MSVC target and Visual Studio 2022 CRT/libraries, as well as llvm-mingw.
+
+Fifteen targeted checks passed before the final full suite; the full Windows
+suite completed with 501 passed, 36 skipped and the unchanged symlink-fixture
+privilege failure in `nx2/test_nup_paths.py` (WinError 1314). The NGX renderer
+compiled/linked successfully. The user reported successful live NR with DLSS
+and FSR 3.1, Before and After, on the earlier experimental build; no same-scene
+numbers or game area were supplied, so this is qualitative user feedback, not
+an instrumented performance result. No Linux or additional GPU/controller
+coverage is claimed for this merge. New hosted workflows must still validate
+the published commit; local success is not a claim of green GitHub CI.
+
+The complete matching Windows game build also succeeded after this merge
+(61 seconds, compilation 19 seconds); it remains in the isolated local test
+folder. This build result does not add a new visual or controller test.

@@ -99,6 +99,7 @@ struct TemporalImage {
 /// (DLAA, FSR's native AA: the render size)
 struct TemporalFrame {
     TemporalImage color, depth, motion, output;
+    int nr_stage = 0; // Routing snapshot: a UI edit cannot run NR twice in one frame.
     uint32_t render_w = 0, render_h = 0;
     float jitter[2]{};          // (the scene's sub-pixel offset this frame, in render pixels, x right and y down)
     bool reset = false;         // (no history: the first frame, or one after a gap or a camera cut the chain saw)

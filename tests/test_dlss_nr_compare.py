@@ -77,6 +77,7 @@ int main() {
     for (const char* name : {"Temporal history", "Auto skin mask", "UI correction", "Debug view",
          "Style", "Model preset", "Local structure", "Local tone", "Skin structure", "Color strength"}) assert(names.count(name)==1);
     assert(!names.count("Compare shortcut") && !names.count("Retry detection") && !names.count("Reset NR settings"));
+    assert(!names.count("Neural Rendering"));
     assert(!names.count("Group") && !names.count("Controls") && !names.count("Compare"));
     assert(!nr_compare_setting(-1) && !nr_compare_setting(count));
     for (int i=0;i<count;++i) {
@@ -102,7 +103,7 @@ int main() {
     source = source.replace('ROWS', '\n'.join('{TAB_DLSS5,"'+name+'",'+value+','+','.join(bounds)+'},'
                                             for name, value, *bounds in entries))
     source = source.replace('HELPERS', block(menu, 'Row* nr_compare_setting(')+'\n'+block(menu, 'void nr_compare_adjust('))
-    nav_start=menu.index('        int adjust = 0;', menu.index('nr_script_f8_press = false;', menu.index('void menu_tick')))
+    nav_start=menu.index('        int adjust = 0;', menu.index('    if (nr_comparison.active) {', menu.index('void menu_tick')))
     source = source.replace('NAVIGATION', menu[nav_start:menu.index('        bool activate =',nav_start)])
     with tempfile.TemporaryDirectory(prefix='nr-compare-') as folder:
         cpp = Path(folder)/'compare.cpp'

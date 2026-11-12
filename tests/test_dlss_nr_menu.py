@@ -24,6 +24,13 @@ def main():
     menu=(ROOT/'gpu/vk/vk_menu.cpp').read_text(encoding='utf-8')
     assert re.search(r'"DLSS model".*?hn_dlss_model, false, true\},\s*'
                      r'\{TAB_GRAPHICS, "DLSS 5 Neural Rendering"', menu, re.S)
+    section=menu[menu.index("    // The same persistent state"):menu.index("    // Audio",menu.index("    // The same persistent state"))]
+    headings=re.findall(r'\{TAB_DLSS5, "([^"]+)".*?nullptr, nullptr, nullptr, false, true, -1, true\}',section)
+    assert headings==["Base Options","Advanced Options","Masks","Compare","Diagnostics"]
+    names=list(dict.fromkeys(re.findall(r'\{TAB_DLSS5, "([^"]+)", &opts\.',section)))
+    assert names==["Neural Rendering","Visual profile","Style","Intensity","Model preset","Local structure","Local tone","Skin structure","Color strength","Stage","Auto skin mask","UI correction","Compare Toolbar position","Temporal history","Debug view"]
+    assert 'VK_F8' not in menu and 'nr_script_f8' not in menu and 'nr_shortcut_pad' not in menu
+    assert 'opts.dlss5_compare_mode' not in menu and 'opts.dlss5_group' not in menu and 'opts.dlss5_advanced' not in menu
     options=block((ROOT/'gpu/vk/vk_menu.h').read_text(encoding='utf-8'),'struct Options {')+';'
     tabs=block(menu, "enum MenuTab {")+";"
     controls=block((ROOT/'gpu/vk/vk_dlss.h').read_text(encoding='utf-8'),'struct DlssNrControls {')+';'
@@ -42,6 +49,16 @@ using namespace mkwvk;
 """
     # Keep NR helper types/functions in their production namespace.
     fixture=fixture.replace('using namespace mkwvk;','namespace mkwvk {\n'+options+'\n'+controls+r"""
+// Use the MSVC CRT's secure API on the Windows CI toolchain; retain portable stdio elsewhere.
+FILE* test_file() {
+#ifdef _MSC_VER
+    FILE* file=nullptr;
+    assert(tmpfile_s(&file)==0);
+    return file;
+#else
+    return tmpfile();
+#endif
+}
 Options opts, saved;
 int saved_value(int* value) { return *value; }
 DlssNrControls published;
@@ -49,7 +66,6 @@ std::atomic<bool> open_now{true};
 bool menu_refresh=false;
 TABS
 int page=0,cur_tab=TAB_DLSS5;
-constexpr int VK_F8=0x77;
 struct Host { bool (*take_key_press)(int); } *host=nullptr;
 void logf(const char*,...) {}
 int saves=0,override_value=-1;
@@ -60,11 +76,11 @@ dlss_nr::Issue dlss_nr_check(bool=false) { return dlss_nr::Issue::none; }
 dlss_nr::Issue dlss_nr_issue() { return dlss_nr::Issue::none; }
 """)
     fixture=fixture.replace("TABS",tabs)
-    for marker in ['bool nr_slider(','dlss_nr::Settings nr_model(','void nr_look(','void nr_publish(','const char* nr_ini_key(']:
+    for marker in ['const char* tx_nr_preset(','bool nr_slider(','dlss_nr::Settings nr_model(','void nr_look(','void nr_publish(','const char* nr_ini_key(']:
         fixture+=block(menu,marker)+'\n'
     fixture+=r"""
 struct Row { int* value; int lo, hi; };
-Row rows[] = {{&opts.dlss5_group, 0, 1}, {&opts.dlss5_intensity, 0, 200}, {&opts.dlss5_debug, 0, 5}, {&opts.game_lang, 0, 13},
+Row rows[] = {{&opts.dlss5_intensity, 0, 200}, {&opts.dlss5_stage, 0, 1}, {&opts.dlss5_debug, 0, 5}, {&opts.game_lang, 0, 13},
               {&opts.output_res, 0, 8}, {&opts.ultrawide, 0, 4}};
 const char* ini_key(const Row& r) {
     if (r.value == &opts.output_res) return "output_res";
@@ -98,6 +114,10 @@ SAVE_ROWS
 using namespace mkwvk;
 int main() {
     static_assert(TAB_DLSS5 >= TAB_COUNT && TAB_DLSS5 != TAB_MOTION);
+    assert(std::string(tx_nr_preset(0))=="Model 2 (default)");
+    assert(std::string(tx_nr_preset(1))=="Model 1");
+    assert(std::string(tx_nr_preset(2))==std::string(tx_nr_preset(0)));
+    assert(std::string(tx_nr_preset(3))=="Legacy hint 3");
     opts.show_fps = 0;
     opts.dlss5 = 1;
     opts.dlss5_intensity = 45;
@@ -106,29 +126,27 @@ int main() {
     opts.game_lang = 2; // language.txt owns this choice, not the NR/options transaction.
     load_line("game_language=7");
     assert(opts.game_lang == 2);
-    for (int current : {0, 1}) for (int dir : {-1, 1}) {
-        opts.dlss5_group=current;
-        int next=current+dir;
-        assert(nr_prepare_row(rows[0], next, dir));
-        assert(next==(dir<0 ? 0 : 1)); // A named group is selected, never toggled away by a second click.
-    }
-    for (const char* legacy : {"dlss5_group=0", "dlss5_group=2", "dlss5_group=3", "dlss5_group=-9", "dlss5_group=9999999999999"}) {
-        opts.dlss5_group=1; load_line(legacy); assert(opts.dlss5_group==0);
-    }
-    load_line("dlss5_group=1"); assert(opts.dlss5_group==1);
+    for (const char* obsolete : {"dlss5_group=1", "dlss5_advanced=1", "dlss5_compare_mode=1"}) load_line(obsolete);
+    assert(opts.dlss5==1 && opts.dlss5_intensity==45);
+    load_line("dlss5_stage=999"); assert(opts.dlss5_stage==1);
+    load_line("dlss5_stage=invalid"); assert(opts.dlss5_stage==1);
+    load_line("dlss5_stage=-99"); assert(opts.dlss5_stage==0);
+    load_line("dlss5_stage=1"); assert(opts.dlss5_stage==1);
     load_line("dlss5_intensity=999"); assert(opts.dlss5_intensity==200);
     load_line("dlss5_intensity=invalid"); assert(opts.dlss5_intensity==200);
     load_line("dlss5_intensity=35");
     load_line("dlss5_debug=5"); assert(opts.dlss5_debug == 0);
     opts.dlss5=1; opts.dlss5_profile=dlss_nr::Balanced;
-    opts.dlss5_debug=4; opts.dlss5_compare_mode=1;
+    opts.dlss5_debug=4;
     assert(nr_slider(&opts.dlss5_intensity) && !nr_slider(&opts.dlss5_profile));
     assert(std::string(nr_ini_key(&opts.dlss5_intensity))=="dlss5_intensity");
-    assert(std::string(nr_ini_key(&opts.dlss5_compare_mode))=="dlss5_compare_mode");
     assert(std::string(nr_ini_key(&opts.dlss5_compare_top))=="dlss5_compare_top");
     assert(nr_ini_key(&opts.rumble)==nullptr);
     nr_compare_enter();
     assert(nr_comparison.active && override_value==1 && opts.dlss5_debug==0);
+    const int old_stage=opts.dlss5_stage;
+    opts.dlss5_stage=1-old_stage;
+    assert(nr_persisted_value(&opts.dlss5_stage)==old_stage);
     const int old_history=opts.dlss5_history, old_top=opts.dlss5_compare_top;
     opts.dlss5_history=1-old_history; opts.dlss5_compare_top=1-old_top;
     assert(nr_persisted_value(&opts.dlss5_history)==old_history);
@@ -138,26 +156,30 @@ int main() {
     assert(nr_persisted_value(&opts.dlss5_color)==100);
     assert(nr_persisted_value(&opts.dlss5)==1);
     nr_compare_leave(false);
+    assert(opts.dlss5_stage==old_stage);
     assert(opts.dlss5_history==old_history && opts.dlss5_compare_top==old_top);
     assert(!nr_comparison.active && open_now && cur_tab==TAB_DLSS5 && page==0);
     assert(opts.dlss5_intensity==35 && opts.dlss5_color==100 && opts.dlss5==1 && saves==0);
-    assert(opts.dlss5_debug==4 && opts.dlss5_compare_mode==1 && override_value==-1);
+    assert(opts.dlss5_debug==4 && override_value==-1);
     nr_compare_enter();
+    opts.dlss5_stage=0;
     opts.dlss5_intensity=45; opts.dlss5_profile=dlss_nr::Custom;
     nr_comparison.toggle();
     nr_compare_leave(true);
+    assert(saved.dlss5_stage==0 && published.stage==0);
     assert(saves==1 && saved.dlss5==0 && saved.dlss5_intensity==45);
     assert(saved.dlss5_profile==dlss_nr::Original && saved.dlss5_debug==4);
     assert(open_now && !nr_comparison.active && published.model.intensity==45 && !published.requested);
-    FILE* ini=tmpfile(); assert(ini); save_rows_to(ini); rewind(ini);
+    FILE* ini=test_file(); assert(ini); save_rows_to(ini); rewind(ini);
     char persisted[512]{}; fread(persisted,1,sizeof persisted-1,ini); fclose(ini);
     assert(strstr(persisted,"dlss5_intensity=45") && !strstr(persisted,"dlss5_debug"));
+    assert(strstr(persisted,"dlss5_stage=0"));
     assert(!strstr(persisted,"game_language"));
     assert(strstr(persisted,"output_res=2048x1152") && strstr(persisted,"ultrawide=1"));
     // A process override must keep the player's saved custom size/aspect alongside NR preferences.
     opts.output_res=custom_index(); player_custom_output={1600,1200}; hold_output=true;
     opts.ultrawide=aspect_started; ultrawide_read=0;
-    ini=tmpfile(); assert(ini); save_rows_to(ini); rewind(ini);
+    ini=test_file(); assert(ini); save_rows_to(ini); rewind(ini);
     memset(persisted,0,sizeof persisted); fread(persisted,1,sizeof persisted-1,ini); fclose(ini);
     assert(strstr(persisted,"output_res=1600x1200") && strstr(persisted,"ultrawide=0"));
     assert(strstr(persisted,"dlss5_intensity=45") && !strstr(persisted,"dlss5_debug"));
@@ -197,10 +219,10 @@ int dlss_why() { return DLSS_OK; }
 namespace ur { bool upscaler_shown(unsigned) { return true; } bool model_shown(bool v) { return v; } }
 Row rows[] = {
 ENTRY
-    {TAB_DLSS5,"Common",&opts.dlss5,0,1,1,nullptr,"",nullptr,false,true,-1,false,0},
-    {TAB_DLSS5,"Base",&opts.dlss5,0,1,1,nullptr,"",nullptr,false,true,-1,false,1},
-    {TAB_DLSS5,"General",&opts.dlss5,0,1,1,nullptr,"",nullptr,false,true,-1,false,3},
-    {TAB_DLSS5,"Quality",&opts.dlss5,0,1,1,nullptr,"",nullptr,false,true,-1,false,4}
+    {TAB_DLSS5,"Common",&opts.dlss5,0,1,1,nullptr,"",nullptr,false,true,-1,false},
+    {TAB_DLSS5,"Base",&opts.dlss5,0,1,1,nullptr,"",nullptr,false,true,-1,false},
+    {TAB_DLSS5,"General",&opts.dlss5,0,1,1,nullptr,"",nullptr,false,true,-1,false},
+    {TAB_DLSS5,"Quality",&opts.dlss5,0,1,1,nullptr,"",nullptr,false,true,-1,false}
 };
 IS_NR
 VISIBILITY
@@ -221,11 +243,7 @@ int main() {
     static_assert(TAB_COUNT==5 && TAB_DLSS5>=TAB_COUNT && TAB_MOTION>=TAB_COUNT);
     for(int i=0;i<5;i++) assert(!row_shown(i)); // No SDK: no dead submenu entry or controls.
     built=true;
-    assert(row_shown(0) && row_shown(1) && row_shown(2) && !row_shown(3) && !row_shown(4));
-    opts.dlss5_advanced=1;
-    assert(row_shown(1) && !row_shown(2) && row_shown(3) && !row_shown(4));
-    opts.dlss5_group=1;
-    assert(!row_shown(3) && row_shown(4));
+    for (int i=0;i<5;i++) assert(row_shown(i)); // One page, all sections accessible.
     press[7]=true;enter(rows[0]);assert(cur_tab==TAB_DLSS5 && !press[7]);
     press[5]=true;navigation();assert(cur_tab==TAB_GRAPHICS && open_now && !press[5]);
     cur_tab=TAB_MOTION;press[5]=true;navigation();assert(cur_tab==TAB_CONTROLS && open_now && !press[5]);

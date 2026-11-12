@@ -62,7 +62,7 @@ capability checks; changing the driver/runtime or opt-in setting requires
 restart. A copied Windows DLL is not considered proof of Linux support.
 
 With no native NR implementation the expected result is original rendering
-plus a compact availability explanation inside Base/Advanced, with requested
+plus a compact availability explanation inside the sectioned NR settings page, with requested
 preferences retained. Other tabs and normal gameplay do not show the error.
 
 ## Windows isolation

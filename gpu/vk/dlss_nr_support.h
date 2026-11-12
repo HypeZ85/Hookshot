@@ -42,7 +42,7 @@ inline const char* message(Issue issue) {
     case Issue::unsupported_gpu:
         return "DLSS 5 is off: the selected GPU does not support Neural Rendering with the installed driver/runtime. DLSS Super Resolution support alone is not enough. Select a compatible GPU and driver.";
     case Issue::needs_upscaler:
-        return "DLSS 5 is off. First select NVIDIA DLSS or NVIDIA DLAA under Graphics > Upscaler, then enable Neural Rendering again. The game's own upscaler cannot run DLSS 5.";
+        return "DLSS 5 is off. First select DLSS, DLAA or FSR under Graphics > Upscaler, then enable Neural Rendering again. The game's own upscaler cannot run DLSS 5.";
     case Issue::needs_driver:
         return "DLSS 5 is off: NVIDIA reports that a newer graphics driver is required. Update the driver and restart the game.";
     case Issue::missing_dlss_runtime:
