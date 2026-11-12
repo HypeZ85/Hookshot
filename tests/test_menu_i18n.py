@@ -40,6 +40,39 @@ class MenuI18nTests(unittest.TestCase):
         self.tables, self.langs = tables()
         menu = (VK / "vk_menu.cpp").read_text(encoding="utf-8")
         self.menu = set(c_strings(menu))
+        # NR labels and recoverable availability messages live in shared, GPU-free headers.
+        for name in ("dlss_nr_controls.h", "dlss_nr_support.h"):
+            self.menu.update(c_strings((VK / name).read_text(encoding="utf-8")))
+
+    def test_neural_rendering_coverage(self):
+        menu = (VK / "vk_menu.cpp").read_text(encoding="utf-8")
+        start = menu.index("    // The same persistent state")
+        rows = menu[start:menu.index("    // Audio", start)]
+        required = set()
+        for name, hint in re.findall(r'\{TAB_DLSS5, "([^"]+)".*?, "([^"]+)", nullptr,', rows):
+            required.update((name, hint))
+        required.update(c_strings(menu[menu.index("const char* tx_nr("):menu.index("dlss_nr::Settings nr_model(")]))
+        for name in ("dlss_nr_controls.h", "dlss_nr_support.h"):
+            text = (VK / name).read_text(encoding="utf-8")
+            if name == "dlss_nr_controls.h":
+                text = text[text.index("inline const char* profile_name"):text.index("// 310.9.16")]
+            required.update(c_strings(text))
+        required.discard("")
+        required.update(("DLSS 5 Neural Rendering", "NR unavailable", "NR applying...", "NR ON", "NR OFF",
+                         "Intensity %d%%", "Advanced", "Base", "Save", "Cancel", " (unavailable)", "F8 / ",
+                         ": hold for original", ": toggle NR",
+                         " | Up/Down: row | Left/Right: browse / adjust | Esc: Cancel",
+                         " | Arrows: choose/adjust | Enter: select | Esc: Cancel",
+                         "Experimental Neural Rendering controls and comparison. Requires DLSS or DLAA and a compatible user-supplied NR runtime."))
+        for table, pairs in self.tables.items():
+            self.assertFalse(required - dict(pairs).keys(), "%s: untranslated NR text: %s" % (table, required - dict(pairs).keys()))
+            for en, text in pairs:
+                if en not in required:
+                    continue
+                identifiers = re.findall(r'RX_[A-Z0-9_]+(?:=\d)?|(?:ngx/)?nvngx_\w+\.dll|libnvidia-ngx-dlss\.so', en)
+                for identifier in identifiers:
+                    self.assertEqual(en.count(identifier), text.count(identifier),
+                                     "%s: NR runtime identifier changed: %s" % (table, identifier))
 
     def test_languages(self):
         self.assertEqual(self.langs[0][:3], ("en", "English", "nullptr"))

@@ -286,3 +286,24 @@ The final five upstream commits have compile/source-check coverage here; the
 V-Sync/Frame Generation fix has no new live GPU validation from this run.
 Linux validation and the earlier shutdown/TDR investigation remain limited as
 previously documented. No proprietary artifacts are included.
+
+## NR localization follow-up
+
+Completed NR menu coverage in all 13 non-English translation tables (121 source
+strings including labels, profile names, tooltips, Windows/Linux availability
+errors, Compare status and input hints). Existing translations are reused.
+The initial translations were machine-assisted; Italian text and ambiguous
+technical labels were reviewed, with further native-speaker review welcome.
+Only public menu text was sent for translation. There is no network translation
+or additional dependency in the game.
+
+Compare now translates labels and values before composing its counter/status
+lines. Text fitting translates before clipping UTF-8 characters, preventing
+truncated English lookup keys from silently reverting to English. Percentages,
+DLL paths and environment switches remain unchanged. Saved keys are unaffected.
+
+Windows NGX renderer linking passes. Complete suite: **464 passed, 3 failed,
+34 skipped** in 111 seconds, with the same documented upstream/environment
+failures. Final translation data refinements were followed by passing coverage
+and compiled runtime-lookup tests in every locale and a successful renderer
+rebuild. No GPU, Linux or all-locale visual layout verification is claimed.

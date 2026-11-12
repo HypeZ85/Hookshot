@@ -5,6 +5,22 @@ Vulkan NGX integration. It runs on the scene color before DLSS SR/DLAA and
 before Hookshot's HUD/menu composition. It does not add Streamline or another
 injection layer. Ordinary rendering continues when NR is unavailable.
 
+## Menu translations
+
+NR labels, profiles, tooltips, availability errors and Compare controls are covered
+by the existing menu translation tables for all 13 non-English locales. English
+remains the source language and fallback. Runtime identifiers, DLL filenames,
+environment switches and numeric formats remain literal. Compare translates its
+component labels before composition, and fitting clips translated UTF-8 text.
+Language selection uses the existing Menu language setting; saved NR keys and
+values are unchanged. No translation service or network access is used at runtime.
+
+The initial translations were machine-assisted, with Italian review and technical
+terminology corrections across locales. Native-speaker review remains welcome,
+as for the upstream tables. Coverage and runtime-lookup tests check every locale,
+including percentages, composed labels and unavailable-runtime messages. Visual
+fit and glyph coverage across every platform/aspect ratio have not been verified.
+
 ## Requirements and availability
 
 Build with the existing `HOOKSHOT_NGX_SDK` workflow, select NVIDIA DLSS or

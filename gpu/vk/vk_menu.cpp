@@ -2444,7 +2444,8 @@ std::vector<size_t> char_starts(const std::string& t) {
     at.push_back(t.size());
     return at;
 }
-std::string fit(ui::Ctx& c, ImFont* f, float px, float room, const std::string& label, bool sel) {
+std::string fit(ui::Ctx& c, ImFont* f, float px, float room, const std::string& source, bool sel) {
+    const std::string label = i18n::tr_text(source); // Clip translated glyphs, never a truncated English lookup key.
     auto width = [&](const std::string& t) { return ui::size_of(f, px, t.c_str()).x; };
     if (width(label) <= room) return label;
     const std::vector<size_t> at = char_starts(label);
@@ -2654,7 +2655,9 @@ void draw_nr_compare(ui::Ctx& c) {
     const bool desired = nr_comparison.override_for(nr_comparison.was_held, opts.dlss5_compare_mode != 0)==1;
     const char* state = dlss_nr::blocking(dlss_nr_issue()) ? "NR unavailable" :
         stats.active != desired ? "NR applying..." : stats.active ? "NR ON" : "NR OFF";
-    const std::string labels[] = {state, "Intensity "+std::to_string(opts.dlss5_intensity)+"%",
+    char strength[128];
+    snprintf(strength, sizeof strength, i18n::tr("Intensity %d%%"), opts.dlss5_intensity);
+    const std::string labels[] = {state, strength,
         tx_nr_profile(opts.dlss5_profile), nr_compare_advanced ? "Base" : "Advanced", "Save", "Cancel"};
     c.d->AddRectFilled(ImVec2(x,y),ImVec2(x+bw,y+bh),ui::rgba(30,24,17,190),3*s);
     c.d->AddRect(ImVec2(x,y),ImVec2(x+bw,y+bh),ui::alpha(ui::kEdge,0.8f),3*s);
@@ -2681,8 +2684,8 @@ void draw_nr_compare(ui::Ctx& c) {
                 if (selected) ui::gold(c,a,b);
                 else c.d->AddRectFilled(a,b,ui::alpha(ui::kCellName,0.5f));
                 std::string label;
-                if (!row) label = std::string(r->name)+"  "+std::to_string(nr_compare_setting_index+1)+"/"+std::to_string(count);
-                else label = std::string(r->text ? r->text(*r->value) : "")+(locked ? " (unavailable)" : "");
+                if (!row) label = i18n::tr_text(r->name)+"  "+std::to_string(nr_compare_setting_index+1)+"/"+std::to_string(count);
+                else label = i18n::tr_text(r->text ? r->text(*r->value) : "")+(locked ? i18n::tr(" (unavailable)") : "");
                 if (!row) {
                     const Row* previous = nr_compare_setting((nr_compare_setting_index+count-1)%count);
                     const Row* next = nr_compare_setting((nr_compare_setting_index+1)%count);
@@ -2704,8 +2707,8 @@ void draw_nr_compare(ui::Ctx& c) {
             }
         }
     }
-    const std::string hint = std::string("F8 / ")+pad_name(nr_shortcut_pad())+(opts.dlss5_compare_mode ? ": hold for original" : ": toggle NR")+
-        (nr_compare_advanced ? " | Up/Down: row | Left/Right: browse / adjust | Esc: Cancel" : " | Arrows: choose/adjust | Enter: select | Esc: Cancel");
+    const std::string hint = std::string(i18n::tr("F8 / "))+pad_name(nr_shortcut_pad())+i18n::tr(opts.dlss5_compare_mode ? ": hold for original" : ": toggle NR")+
+        i18n::tr(nr_compare_advanced ? " | Up/Down: row | Left/Right: browse / adjust | Esc: Cancel" : " | Arrows: choose/adjust | Enter: select | Esc: Cancel");
     const std::string line=fit(c,c.f.body,13*s,bw-24*s,hint,false);
     ui::text(c,c.f.body,13*s,ImVec2(x+12*s,y+bh-24*s),ui::kSoft,line.c_str());
 }
