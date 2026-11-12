@@ -22,6 +22,7 @@ Each is a runtime switch where it can be, so the game's own path stays reachable
 - The OptimizeChangeBank thread's allocations tried again when their heap is full (host/oot_heap_retry.c): f_804566e0's two
   calls of f_80522050, its GPU memory (GPU_ALLOC_SITES), and its two tryAllocs of CPU buffers (HEAP_ALLOC_SITES). They went on
   with a null pointer and crashed writing through it (issue 1697). The supported build only.
+- Ocarina note controls: the note-wait action's start (f_828a9190) and tick (f_828a9280) report the wait to the host (hos_oc_wait, hos_oc_beat), which swaps the five notes for its own controls (host/nn_hid.c); a tick whose gates refuse reports no wait, so a dialogue keeps its buttons.
 """
 import collections
 import glob
@@ -401,6 +402,9 @@ def patch_movie_frames(s):
 # - f_800672e0, the water renderer: its ripple simulation runs (int)step times the water's substeps (+76 of the pass) each frame.
 #   Cut to 0, the rings Link and the actors make in water stood still above 60 fps. Found by atk3001 for Lichii (zortos293/
 #   Lichii#1152), as ported to Fritchii (Frizti/Fritchii d389685a4, 063dbb741): its remainder is kept per water object (x21).
+# - f_803edf70, the time of day: each frame it adds (int)(2 * step) game seconds (+60) to the seconds of the day (+40, a day of
+#   86400, then the day count +44). Cut, it added 1 a frame below 120 fps (the day slower: 83% at 100) and 0 above 120, where
+#   the clock stood still and the sun swung back and forth over the frozen hour.
 # hos_frame_whole carries the fractions per counter while the frames' own time is the step, so each moves at the game's rate;
 # otherwise it cuts as the game does. A site is added here once it is seen to misbehave in game. (A site's function, its code to
 # replace, and the counter's address for its remainder.)
@@ -414,6 +418,12 @@ WHOLE_SITES = (
     ("void f_800672e0(Ctx *__restrict A64_NOESC c) {@",
      "    c->x[9]=recomp_fp_to_int(c->vreg[0][0]&UINT64_C(0xffffffff),32,32,1,3,c->fpcr,&c->fpsr);@",
      "c->x[21]"),
+    # (the cut with the store after it: the function cuts into x8 the same way once more, in the branch that sets
+    #  the time from another source)
+    ("void f_803edf70(Ctx *__restrict A64_NOESC c) {@",
+     "    c->x[8]=recomp_fp_to_int(c->vreg[0][0]&UINT64_C(0xffffffff),32,32,1,3,c->fpcr,&c->fpsr);@"
+     "    recomp_store32(c,c->x[19] + 60,c->x[8]);@",
+     "c->x[19] + 60"),
 )
 WHOLE_SITES = tuple((h.replace("@", "\n"), o.replace("@", "\n"), k) for h, o, k in WHOLE_SITES)
 WHOLE_MARK = "/* (the step's whole frames: nx2/oot_patches.py) */"
@@ -656,6 +666,84 @@ def patch_heap_retry(s):
     return s, found
 
 
+# (the wait action's start and tick, code_033.c; the anchors carry call-return PC literals, so each is once in its function)
+OC_DECL = ("extern volatile int hos_oc_wait;\nextern volatile int hos_oc_last_kind;\n"
+           "extern volatile unsigned hos_oc_beat;\n"
+           "#define HOS_OC_BUTTONS(k) ((k) == 1 || (k) == 2 || (k) == 3 || (k) == 10)\n")
+OC_ENTRY_HEAD = "void f_828a9190(Ctx *__restrict A64_NOESC c) {"
+OC_ENTRY_OLD = ("    c->x[1]=recomp_load32(c,c->x[19] + 32);\n"
+                "    { uint64_t _r = ((uint64_t)0 | ((c->x[0]) << 0)); c->x[20] = _r; }\n"
+                "c->x[30] = 0x828a91e4ULL; f_832b35d0(c);")
+OC_ENTRY_NEW = ("    c->x[1]=recomp_load32(c,c->x[19] + 32);\n"
+                "    hos_oc_last_kind = (int)c->x[1], hos_oc_wait = HOS_OC_BUTTONS(c->x[1]) ? 1 : 2, hos_oc_beat++;"
+                "   /* (nx2/oot_patches.py: the note wait began; 1 and 3 are the field ocarina, 2 a song lesson, "
+                "10 the scarecrow's recording, 13 a dialogue's, which stays the game's) */\n"
+                "    { uint64_t _r = ((uint64_t)0 | ((c->x[0]) << 0)); c->x[20] = _r; }\n"
+                "c->x[30] = 0x828a91e4ULL; f_832b35d0(c);")
+OC_TICK_HEAD = "void f_828a9280(Ctx *__restrict A64_NOESC c) {"
+OC_TICK_OLD = ("    c->x[8]=recomp_load8(c,c->x[0] + 24);\n"
+               "if (!((c->x[8] >> 1) & 1)) { goto L_828a92e4; }")
+OC_TICK_NEW = ("    c->x[8]=recomp_load8(c,c->x[0] + 24);\n"
+               "if (!((c->x[8] >> 1) & 1)) { hos_oc_wait = 0; goto L_828a92e4; }"
+               "   /* (nx2/oot_patches.py: this action stopped running: no wait) */\n"
+               "    hos_oc_wait = HOS_OC_BUTTONS(hos_oc_last_kind) ? 1 : 2, hos_oc_beat++;"
+               "   /* (nx2/oot_patches.py: re-armed every running tick: the input resets between note windows end "
+               "one wait without ending the action; the beat tells the host the wait is alive) */")
+# (the tick's own gates sit after the re-arm: while any of them refuses, the game is not asking for notes, say a
+# dialogue took the buttons; the host must hear that, or its pad swap eats the buttons the dialogue wants)
+OC_TICK_GATES = (
+    ("if (!c->z) { goto L_828a92e4; }",
+     "if (!c->z) { hos_oc_wait = 0; goto L_828a92e4; }"
+     "   /* (nx2/oot_patches.py: the action's mode check refused: no wait) */"),
+    ("c->x[30] = 0x828a92e0ULL; f_806aac40(c);\n"
+     "if (c->x[0] != 0) { goto L_828a92f8; }",
+     "c->x[30] = 0x828a92e0ULL; f_806aac40(c);\n"
+     "if (c->x[0] != 0) { goto L_828a92f8; }\n"
+     "hos_oc_wait = 0;   /* (nx2/oot_patches.py: the input context is gone: no wait) */"),
+    ("c->x[30] = 0x828a9318ULL; f_82856760(c);\n"
+     "if (c->x[0] == 0) { { A64_POLL(c); goto L_828a92e4; } }",
+     "c->x[30] = 0x828a9318ULL; f_82856760(c);\n"
+     "if (c->x[0] == 0) { { A64_POLL(c); hos_oc_wait = 0; goto L_828a92e4; } }"
+     "   /* (nx2/oot_patches.py: the wait's owner refused: no wait, and the pads are the game's again) */"),
+)
+OC_DONE_OLD = "recomp_store32(c,c->x[19] + 24,c->x[9]);"
+OC_DONE_NEW = (OC_DONE_OLD + "\n    hos_oc_wait = 0;"
+               "   /* (nx2/oot_patches.py: the wait action finished) */")
+OC_RESET_OLD = "c->x[30] = 0x828a93e4ULL; f_832b35d0(c);"
+OC_RESET_NEW = (OC_RESET_OLD + "\n    hos_oc_wait = 0;"
+                "   /* (nx2/oot_patches.py: the input reset: this window's wait is over) */")
+
+
+def patch_ocarina_wait(s):
+    """The wait action reports itself to the host; None when the lift has no such functions, s unchanged when an anchor drifted or it is applied already (never a half-patch)."""
+    splices, hits = [], 0
+    for head, pairs in ((OC_ENTRY_HEAD, [(OC_ENTRY_OLD, OC_ENTRY_NEW)]),
+                        (OC_TICK_HEAD, [(OC_TICK_OLD, OC_TICK_NEW)] + [p for p in OC_TICK_GATES] +
+                                       [(OC_DONE_OLD, OC_DONE_NEW), (OC_RESET_OLD, OC_RESET_NEW)])):
+        at = s.find(head)
+        if at < 0:
+            return None
+        end = s.find("\nvoid f_", at + len(head))
+        body = s[at:end if end >= 0 else len(s)]
+        out = body
+        for old, new in pairs:
+            if new in out:
+                continue
+            if out.count(old) != 1:
+                return s
+            out = out.replace(old, new, 1)
+        if out != body:
+            splices.append((at, end, out))
+            hits = 1
+    if not hits:
+        return s
+    for at, end, out in reversed(splices):   # (later functions first: earlier splices keep the earlier offsets valid)
+        s = s[:at] + out + (s[end:] if end >= 0 else "")
+    if OC_DECL not in s:
+        s = s.replace('#include "a64.h"\n', '#include "a64.h"\n' + OC_DECL, 1)
+    return s
+
+
 def patch_file(s, name, protect_hearts=False):
     """One lifted file's patches (apply(), and nx2/chunks.py edit_c, a process per file): (its text, the places counted in it, the
     lines to print). The counts add up over the files; report() decides from the sums"""
@@ -704,6 +792,13 @@ def patch_file(s, name, protect_hearts=False):
         if movie != out:
             lines.append("oot_patches: the movie's frame count by the frames' time in " + name)
         out = movie
+    ocw = patch_ocarina_wait(out)
+    if ocw is not None:
+        if OC_ENTRY_NEW in ocw:   # (made now, or by an earlier run over this file)
+            counts["ocarina note wait"] += 1
+        if ocw != out:
+            lines.append("oot_patches: the ocarina note wait in " + name)
+        out = ocw
     out, n = fixed_scale(out)
     if n:
         counts["fixed path's scale"] += 1
@@ -786,7 +881,8 @@ def patch_file(s, name, protect_hearts=False):
 def report(paths, counts, protect_hearts=False):
     """The warnings from the files' counts (each file's patch_file counts, in the order of paths), and the step divides' rule:
     both or neither, so a file of paths that has the hook is put back"""
-    done = {"dynamic resolution branch": 0, "text speed block": 0, "fixed path's scale": 0, "movie's frame count": 0}
+    done = {"dynamic resolution branch": 0, "text speed block": 0, "fixed path's scale": 0, "movie's frame count": 0,
+            "ocarina note wait": 0}
     if protect_hearts:   # (the supported build's: these places are its functions)
         done["menu focus hook"] = 0
         done["menu tick hook"] = 0
@@ -837,7 +933,7 @@ def report(paths, counts, protect_hearts=False):
               "keeps the game's own step)" % (step_sites, len(STEP_SITES)))
     elif whole_sites != len(WHOLE_SITES):   # (the frames' own time without them: the pick-up indicator stays above 60 fps)
         print("oot_patches: WARNING: %d of %d frame counters found for the step's whole frames (above 60 fps a counter can stop: "
-              "the pick-up indicator)" % (whole_sites, len(WHOLE_SITES)))
+              "the pick-up indicator, the water ripples, the time of day)" % (whole_sites, len(WHOLE_SITES)))
 
 
 def apply(gen, *, protect_hearts=False, required=False):

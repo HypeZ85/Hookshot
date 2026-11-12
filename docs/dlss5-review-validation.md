@@ -222,3 +222,36 @@ Graphics sections, recorder, FPS, Reflex and high-FPS checks pass. The nine
 failures retain the environmental/upstream causes listed above. The full-game
 build and live approval precede only these last four non-menu upstream commits;
 no fresh Linux or GPU-quality validation is claimed for this final merge.
+
+
+## Follow-up merge through c544828f
+
+Integrated 59 upstream commits through
+`c544828ff2d545829505cd894bb7968c7c2c5fcb`. Resolved the menu persistence and
+stick-dead-zone fixture conflicts by retaining both game/menu language state
+and NR settings. Game language remains owned by language.txt; NR debug stays
+session-only, and comparison saves keep their transactional masking. The NR
+menu regression now loads a legacy game-language key without changing that
+choice and verifies it is absent from the options save.
+
+Retained upstream's menu localization and keyboard prompt infrastructure,
+bug-report action, microphone recovery and DLSS SR/Frame Generation failure
+recovery. The NR page's layout/position and actions are unchanged. NR strings
+not present in the upstream translation tables use their documented English
+fallback. No translation or runtime capability is simulated.
+
+Windows NGX renderer link and no-SDK DLSS object compilation pass. The complete
+suite reports **455 passed, 8 failed, 34 skipped** (114 seconds). NR, menu/input,
+localization, DLSS checks, DLSS-G runtime and recorder checks pass. The extra
+language/NR persistence regression also passes. Remaining failures are six
+missing .NET SDK fixtures, Windows extraction-link privileges and the input
+background fixture's unused `oc_consumed_pads` variable under clang 23/Werror.
+That fixture, its runner and host input source are unchanged from upstream;
+no assertions or warning flags were weakened. The prior VRAM-budget and
+HOS_FPS_LOG checks now pass with upstream's updates.
+
+This merge uses upstream renderer API version 19. No complete API-19 game build,
+new GPU play test or Linux build was performed. The earlier live menu approval
+and API-18 game build are historical evidence, not validation of this revision.
+The existing isolated game was left intact; an API-19 renderer should be used
+with an API-19 host build. No proprietary file or generated image is included.

@@ -64,8 +64,8 @@ dlss_nr::Issue dlss_nr_issue() { return dlss_nr::Issue::none; }
         fixture+=block(menu,marker)+'\n'
     fixture+=r"""
 struct Row { int* value; int lo, hi; };
-Row rows[] = {{&opts.dlss5_group, 0, 1}, {&opts.dlss5_intensity, 0, 200}, {&opts.dlss5_debug, 0, 5}};
-const char* ini_key(const Row& r) { return nr_ini_key(r.value); }
+Row rows[] = {{&opts.dlss5_group, 0, 1}, {&opts.dlss5_intensity, 0, 200}, {&opts.dlss5_debug, 0, 5}, {&opts.game_lang, 0, 13}};
+const char* ini_key(const Row& r) { return r.value == &opts.game_lang ? "game_language" : nr_ini_key(r.value); }
 int parse_output(const char* text) { return atoi(text); }
 """+block(menu, 'bool nr_prepare_row(')+r"""
 void load_line(const char* input) {
@@ -94,6 +94,9 @@ int main() {
     opts.dlss5_intensity = 45;
     load_line("dlss5_stats=1"); // An obsolete overlay preference cannot enable FPS or change NR.
     assert(opts.show_fps == 0 && opts.dlss5 == 1 && opts.dlss5_intensity == 45);
+    opts.game_lang = 2; // language.txt owns this choice, not the NR/options transaction.
+    load_line("game_language=7");
+    assert(opts.game_lang == 2);
     for (int current : {0, 1}) for (int dir : {-1, 1}) {
         opts.dlss5_group=current;
         int next=current+dir;
@@ -135,6 +138,7 @@ int main() {
     FILE* ini=tmpfile(); assert(ini); save_rows_to(ini); rewind(ini);
     char persisted[512]{}; fread(persisted,1,sizeof persisted-1,ini); fclose(ini);
     assert(strstr(persisted,"dlss5_intensity=45") && !strstr(persisted,"dlss5_debug"));
+    assert(!strstr(persisted,"game_language"));
     std::puts("NR group migration, keys, temporary save masking, Cancel restore and Save commit: PASS");
 }
 """
