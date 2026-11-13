@@ -73,6 +73,12 @@ or file, is logged as he wrote it, within those limits.
 none, and `unavailable` means the loaded SDL lacks a required diagnostic call. A zero GUID is `unknown`.
 These queries do not change bindings, load a mapping file, or change which controllers are read.
 
+## External ANR runtime
+
+For an ANR-enabled build, `python -I scripts/anr_runtime.py --package <official FG V.B15 full/addon ZIP> --game <folder>`
+imports a user-downloaded external runtime locally. It does not download or bundle ANR. See [ANR runtime import and
+distribution](anr-runtime.md) for the host dependency, integrity checks and licensing questions.
+
 ## Switches for testing and debugging
 
 The running game reads its switches from the environment or from `hookshot_env.txt` beside `image.bin` (one
@@ -111,6 +117,7 @@ screen. It costs some GPU time on cards that cull quickly, so it is off unless s
 | `HOS_WIDE_MAX_PX=<pixels>` | The most pixels a picture wider or narrower than 16:9 takes (`host/hos_wide_size.h`): 5120x2160's by default; 8294400 is 3840x2160's, the cap before |
 | `HOS_DYNRES=0`, `HOS_REALTIME_STEP=0`, `HOS_TEXT_SPEED=<0..3>` | Over the options file: Resolution 100% (non-zero: Auto), Game speed Per frame (1: Real time), Text speed |
 | `RX_VK_FRAMEGEN=0`, `RX_VK_FRAMEGEN_MULT=<2..8>`, `RX_VK_PACE=0`, `RX_VK_UPSCALE=<0..2>` | No frame generation whatever the menu says; over the options file: its multiplier, frame pacing, the upscaling filter |
+
 | `RX_VK_DEVICE=<n>` | The graphics card listed as `vk: device <n>` in the log, over the menu's GPU device |
 | `HOOKSHOT_NO_UPDATE_CHECK=1` | No look for a newer release at the start |
 | `HOS_TRACE=1` | Every Horizon call logged, as `--trace` does |
